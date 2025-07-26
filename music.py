@@ -3,6 +3,7 @@ import pygame
 
 class MusicManager:
     def __init__(self, music_folder):
+        self.current_track = None
         self.music_folder = music_folder
         self.tracks = [
             os.path.join(music_folder, f)
@@ -18,6 +19,7 @@ class MusicManager:
             return
 
         try:
+            self.current_track = self.tracks[self.current_index]
             pygame.mixer.music.load(self.tracks[self.current_index])
             pygame.mixer.music.play()
             print(f"[MUSIC] Now playing: {self.tracks[self.current_index]}")

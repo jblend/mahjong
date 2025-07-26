@@ -5,6 +5,28 @@ import pygame
 import time
 import math
 import traceback
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Setup logging
+log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+log_file = "game.log"
+
+# Create a rotating file handler: max 4KB, keep 1 backup
+handler = RotatingFileHandler(log_file, maxBytes=4096, backupCount=1)
+handler.setFormatter(log_formatter)
+
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+logger.addHandler(handler)
+
+# Example log entries
+logger.info("Game started")
+logger.debug("Player clicked a tile")
+logger.warning("Low FPS warning")
+logger.error("Something went wrong!")
+
+
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout
 )
@@ -39,6 +61,14 @@ class MahjongGame(QWidget):
         try:
             self.setWindowTitle("Mahjong Pygame + Qt5")
             self.setGeometry(100, 100, 1000, 800)
+            self.debug = False
+
+            self.in_shop = False
+            self.in_game_over = False
+            self.game_over_button_rect = pygame.Rect(80, 400, 200, 40)  # Same size as shop_continue
+            self.game_over_flash_toggle = True
+            self.last_flash_time = pygame.time.get_ticks()
+            self.flash_interval = 500  # milliseconds
 
             self.board = []
             self.tile_positions = {}
@@ -46,11 +76,15 @@ class MahjongGame(QWidget):
             self.matched_pairs = {}
             self.wallet = 0
             self.score = 0
+            self.inventory = []
             self.round_number = 1
             self.match_count = 0
             self.tile_match_count = {}  # e.g., {"Tower": 2, "Moon": 1}
             self.combo_multiplier = 1
             self.target_score = self.calculate_target_score()
+
+            self.selected_inventory_index = {}
+            self.hovered_inventory_index = None
 
             # For UI tracking
             self.button_rects = {}
@@ -117,6 +151,7 @@ class MahjongGame(QWidget):
 
             font_path = os.path.join("assets", "fonts", "OldeEnglishRegular-Zd2J.ttf")
             self.combo_font = pygame.font.Font(font_path, 36)  # 36pt size
+            self.button_font = pygame.font.Font(font_path, 32)  # Smaller than combo_font
 
             self.background_tile = pygame.image.load(bg_path).convert()
             self.bg_scroll_x = 0
@@ -130,6 +165,7 @@ class MahjongGame(QWidget):
             self.tile_images = {}
             self.load_tileset_images()
 
+            self.init_shop()
             self.init_ui()
 
             self.timer = QTimer()
@@ -137,12 +173,30 @@ class MahjongGame(QWidget):
             self.timer.timeout.connect(self.tick)  # This will call tick() every 30 ms
             self.timer.start(30)
 
+
             self.new_game()
         except Exception as e:
             print("[FATAL ERROR IN __init__]:", e)
             traceback.print_exc()
 
+    def init_shop(self):
+        self.shop_selected_item_index = None
+        self.shop_message = ""
+        self.shop_items = []
+
     def init_ui(self):
+        self.button_contexts = {
+            "prev_track": "global",
+            "next_track": "global",
+            "volume_slider": "global",
+            "shop_continue": "shop",
+            "inventory_0": "inventory",
+            "inventory_1": "inventory",
+            "inventory_2": "inventory",
+            "inventory_3": "inventory",
+            "inventory_4": "inventory",
+        }
+
         layout = QVBoxLayout()
 
         self.score_label = QLabel(f"Score: {self.score}")
@@ -159,7 +213,7 @@ class MahjongGame(QWidget):
 
         btns = QHBoxLayout()
         new_game_btn = QPushButton("New Game")
-        new_game_btn.clicked.connect(self.start_new_round)
+        new_game_btn.clicked.connect(self.start_new_game)
         btns.addWidget(new_game_btn)
 
         debug_score = QPushButton("Add 100 Score")
@@ -167,7 +221,8 @@ class MahjongGame(QWidget):
         btns.addWidget(debug_score)
 
         end_round = QPushButton("End Round")
-        end_round.clicked.connect(self.start_new_round)
+        # end_round.clicked.connect(self.start_new_round)
+        end_round.clicked.connect(self.update_game_state)
         btns.addWidget(end_round)
 
         trigger_encounter = QPushButton("Trigger Encounter")
@@ -176,7 +231,8 @@ class MahjongGame(QWidget):
 
         layout.addLayout(btns)
         self.canvas_label = QLabel()
-        self.canvas_label.mousePressEvent = self.handle_click
+        # self.canvas_label.mousePressEvent = self.handle_click
+        self.canvas_label.mousePressEvent = self.mousePressEvent
         layout.addWidget(self.canvas_label)
 
         self.setLayout(layout)
@@ -297,6 +353,24 @@ class MahjongGame(QWidget):
         self.combo_timer.stop()
         self.last_match_time = None
 
+    def reset_game_state(self):
+        self.wallet = 0
+        self.score = 0
+        self.round_number = 0
+        self.target_score = 500
+        self.selected_tiles = []
+        self.combo_multiplier = 1
+        self.match_count = 0
+        self.inventory = [None] * 5
+        self.available_encounters = []
+        self.available_encounters_bu = []
+        self.encounter_mode = None
+        self.board = []
+        self.tile_positions = {}
+        self.fading_matched_tiles = []
+        self.animating_tiles = []
+        self._vacated_during_animation = set()
+
     def draw_action_bar(self):
         surface_w = self.surface.get_width()
         surface_h = self.surface.get_height()
@@ -388,29 +462,93 @@ class MahjongGame(QWidget):
         slot_margin = 10
         start_x = surface_w - (slot_w + slot_margin) * 5 - padding
         slot_y = bar_y + 50
+
+
         for i in range(5):
             rect = pygame.Rect(start_x + i * (slot_w + slot_margin), slot_y, slot_w, slot_w)
-            pygame.draw.rect(self.surface, (80, 80, 80), rect)
-            pygame.draw.rect(self.surface, (200, 200, 200), rect, 2)
-            # Draw item icon or placeholder here later
+            is_hovered = (i == self.hovered_inventory_index)
+            is_selected = (i == self.selected_inventory_index)
+
+            # Background
+            bg_color = (100, 100, 100) if is_selected else (80, 80, 80)
+            border_color = (255, 255, 0) if is_hovered else (200, 200, 200)
+
+            pygame.draw.rect(self.surface, bg_color, rect)
+            pygame.draw.rect(self.surface, border_color, rect, 2)
+
+            # Draw icon/placeholder (optional)
+            # pygame.draw.circle(self.surface, (255, 255, 255), rect.center, 10)
+
+            self.button_rects[f"inventory_{i}"] = rect
 
     def mousePressEvent(self, event):
-        # Adjust if your surface is not top-left aligned
-        surf_rect = self.surface.get_rect()
-        surf_top_left = ((self.width() - surf_rect.width) // 2, (self.height() - surf_rect.height) // 2)
-        relative_x = event.x() - surf_top_left[0]
-        relative_y = event.y() - surf_top_left[1]
-        pos = (relative_x, relative_y)
+        x = event.pos().x()
+        y = event.pos().y()
+        print("[DEBUG] Mouse click at:", (x, y))
+        pygame.draw.circle(self.surface, (255, 0, 0), (x, y), 5)
+
+        handled = False  # Track whether anything handled the click
 
         for name, rect in self.button_rects.items():
-            if rect.collidepoint(pos):
+            context = self.button_contexts.get(name, "global")
+
+            # Context-aware filtering
+            if context == "shop" and not self.in_shop:
+                continue
+            if context == "inventory" and self.in_shop:
+                continue
+
+            if rect.collidepoint(x, y):
                 print(f"[CLICK] {name} button clicked")
+
                 if name == "prev_track":
                     self.music_manager.previous_track()
+                    handled = True
+
                 elif name == "next_track":
                     self.music_manager.next_track()
+                    handled = True
+
                 elif name == "volume_slider":
-                    self.dragging_volume = True
+                    self.dragging_volume_slider = True
+                    self.update_volume_from_mouse(x)
+                    handled = True
+
+                elif name.startswith("inventory_"):
+                    index = int(name.split("_")[1])
+                    print(f"[CLICK] Inventory slot {index} clicked")
+                    self.selected_inventory_index = index
+                    # (optional) trigger item logic here
+                    handled = True
+
+                elif name == "shop_continue":
+                    print("[CLICK] shop_continue confirmed")
+                    self.start_new_round()
+                    handled = True
+
+                break  # Found a matching button, stop checking
+
+        if handled:
+            return
+
+        # Shop item buttons (outside button_rects)
+        if self.in_shop:
+            for rect, name, cost in getattr(self, "shop_button_rects", []):
+                if rect.collidepoint(x, y):
+                    print(f"[CLICK] Attempting to buy {name}")
+                    self.attempt_purchase(name, cost)
+                    return
+
+        if self.in_game_over:
+            if self.game_over_button_rect.collidepoint(x, y):
+                print("[CLICK] Start New Game from Game Over screen")
+                self.in_game_over = False
+                self.reset_game_state()
+                self.start_new_round()
+                return
+
+        # Tile selection fallback
+        self.handle_click(event)
 
     def handle_mouse_up(self, event):
         self.dragging_volume = False
@@ -418,20 +556,43 @@ class MahjongGame(QWidget):
     def mouseReleaseEvent(self, event):
         self.handle_mouse_up(event)
 
+        self.dragging_volume_slider = False
+
     def mouseMoveEvent(self, event):
-        self.handle_mouse_motion(event)
+        x = event.pos().x()
+        y = event.pos().y()
+
+        # Track hover index
+        self.hovered_inventory_index = None
+        for i in range(5):
+            rect = self.button_rects.get(f"inventory_{i}")
+            if rect and rect.collidepoint(x, y):
+                self.hovered_inventory_index = i
+                break
+
+        if self.dragging_volume_slider:
+            self.update_volume_from_mouse(event.pos().x())
+
+        self.update()  # Redraw with updated hover state
 
     def handle_mouse_motion(self, event):
         if self.dragging_volume:
-            surf_rect = self.surface.get_rect()
-            surf_top_left = ((self.width() - surf_rect.width) // 2, (self.height() - surf_rect.height) // 2)
-            relative_x = event.x() - surf_top_left[0]
-            relative_y = event.y() - surf_top_left[1]
-
+            x = event.pos().x()
             slider_rect = self.button_rects["volume_slider"]
-            relative_slider_x = min(max(relative_x - slider_rect.x, 0), slider_rect.width)
-            self.music_volume = relative_slider_x / slider_rect.width
+            relative_x = min(max(x - slider_rect.x, 0), slider_rect.width)
+            self.music_volume = relative_x / slider_rect.width
             self.music_manager.set_volume(self.music_volume)
+
+    def update_volume_from_mouse(self, mouse_x):
+        rect = self.button_rects.get("volume_slider")
+        if not rect:
+            return
+        relative_x = max(0, min(mouse_x - rect.x, rect.width))
+        self.music_volume = relative_x / rect.width
+        self.music_manager.set_volume(self.music_volume)
+        print(f"[VOLUME] Adjusted to {self.music_volume:.2f}")
+        self.update()
+
 
     def get_possible_match_count(self):
         name_counts = {}
@@ -445,19 +606,35 @@ class MahjongGame(QWidget):
         return total
 
     def start_new_round(self):
+        print("[ROUND] Starting next round...")
+
+        # Exit shop
+        self.in_shop = False
+        self.selected_inventory_index = None
+
+        self.shop_message = ""
+        self.shop_items = []
+
+        # Transfer leftover points
         leftover = self.score - self.target_score
         if leftover > 0:
             self.wallet += leftover
+
+        # Reset score and round info
         self.score = 0
         self.round_number += 1
         self.target_score = self.calculate_target_score()
+        self.match_count = 0
+        self.combo_multiplier = 1
+        self.fading_matched_tiles = []
 
+        # Handle encounter mode
         if self.round_number % 3 == 0:
             if len(self.available_encounters) == 0:
                 self.available_encounters = self.available_encounters_bu
+                self.available_encounters_bu = []
 
             self.encounter_mode = random.choice(self.available_encounters)
-
             self.available_encounters.remove(self.encounter_mode)
             self.available_encounters_bu.append(self.encounter_mode)
 
@@ -468,9 +645,61 @@ class MahjongGame(QWidget):
             self.encounter_label.setText("Encounter: None")
             self.match_counter_label.setText("")
 
+        # Update UI
         self.wallet_label.setText(f"Wallet: {self.wallet}")
         self.score_label.setText(f"Score: {self.score}")
+
+        # Start new game
         self.new_game()
+        self.update()
+
+    def start_new_game(self):
+        print("[ROUND] Starting next round...")
+
+        # Exit shop
+        self.in_shop = False
+        self.selected_inventory_index = None
+        self.shop_message = ""
+        self.shop_items = []
+
+        # Transfer leftover points
+        leftover = self.score - self.target_score
+        if leftover > 0:
+            self.wallet += leftover
+
+        # Reset score and round info
+        self.score = 0
+        self.round_number = 1
+        self.target_score = self.calculate_target_score()
+        self.match_count = 0
+        self.combo_multiplier = 1
+        self.fading_matched_tiles = []
+
+
+        # Handle encounter mode
+        if self.round_number % 3 == 0:
+            if len(self.available_encounters) == 0:
+                self.available_encounters = self.available_encounters_bu
+                self.available_encounters_bu = []
+
+            self.encounter_mode = random.choice(self.available_encounters)
+            self.available_encounters.remove(self.encounter_mode)
+            self.available_encounters_bu.append(self.encounter_mode)
+
+            self.encounter_label.setText(f"Encounter: {self.encounter_mode}")
+            self.match_counter_label.setText("Encounter triggers every 5 matches")
+        else:
+            self.encounter_mode = None
+            self.encounter_label.setText("Encounter: None")
+            self.match_counter_label.setText("")
+
+        # Update UI labels
+        self.wallet_label.setText(f"Wallet: {self.wallet}")
+        self.score_label.setText(f"Score: {self.score}")
+
+        # Generate new board and redraw
+        self.new_game()
+        self.update()
 
     def new_game(self):
         self.board.clear()
@@ -532,6 +761,7 @@ class MahjongGame(QWidget):
         self.max_grid_y = max(grid_ys)
         self.center_x = (self.min_grid_x + self.max_grid_x) // 2
         self.center_y = (self.min_grid_y + self.max_grid_y) // 2
+
 
     def is_tile_selectable(self, tile):
         gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
@@ -770,6 +1000,12 @@ class MahjongGame(QWidget):
                 alive_particles.append(p)
         self.particles = alive_particles
 
+        if self.in_shop:
+            self.draw_shop_overlay()
+
+        if self.in_game_over:
+            self.draw_game_over_overlay()
+
         # Final blit to Qt
         raw_data = pygame.image.tostring(self.surface, "RGB")
         image = QPixmap.fromImage(
@@ -845,7 +1081,172 @@ class MahjongGame(QWidget):
                                 print(f"[Encounter Triggered] Mode: {self.encounter_mode}")
                                 self.trigger_encounter_effect()
                         self.selected_tiles.clear()
+                        self.update_game_state()
                     break
+
+    def update_game_state(self):
+        moves = self.get_possible_match_count()
+        if self.debug:
+            moves = 0
+
+        print(f"Updating Game State, Moves left: {moves} Target Score: {self.target_score}")
+        if moves <= 0:
+            if self.score < self.target_score:
+                print("[STATE] No moves left and target score NOT reached → Game Over")
+                self.trigger_game_over()
+            else:
+                print("[STATE] No moves left but target score met → Entering Shop")
+                self.enter_shop_screen()
+
+    def trigger_game_over(self):
+        print("[GAME OVER] Triggered")
+        self.in_game_over = True
+        self.in_shop = False  # Ensure shop is closed
+        self.shop_items = []
+        self.selected_inventory_index = None
+        self.update()
+
+    def draw_game_over_overlay(self):
+        now = pygame.time.get_ticks()
+        if now - self.last_flash_time > self.flash_interval:
+            self.game_over_flash_toggle = not self.game_over_flash_toggle
+            self.last_flash_time = now
+
+        overlay = pygame.Surface(self.surface.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))  # Semi-transparent dark overlay
+        self.surface.blit(overlay, (0, 0))
+
+        # Text settings
+        game_over_color = (220, 0, 0) if self.game_over_flash_toggle else (120, 0, 0)
+        shadow_offset = 4
+
+        # Render drop shadow
+        shadow_text = self.combo_font.render("GAME OVER", True, (0, 0, 0))
+        game_over_text = self.combo_font.render("GAME OVER", True, game_over_color)
+
+        text_x = self.surface.get_width() // 2 - game_over_text.get_width() // 2
+        text_y = 180
+
+        self.surface.blit(shadow_text, (text_x + shadow_offset, text_y + shadow_offset))
+        self.surface.blit(game_over_text, (text_x, text_y))
+
+        # Draw button box
+        pygame.draw.rect(self.surface, (60, 0, 0), self.game_over_button_rect)  # dark red
+        pygame.draw.rect(self.surface, (220, 0, 0), self.game_over_button_rect, 3)  # red border
+
+        # --- Draw button ---
+        btn_label = "Start new game"
+        mouse_pos = pygame.mouse.get_pos()
+        hovering = self.game_over_button_rect.collidepoint(mouse_pos)
+
+        # Button styling
+        bg_color = (15, 15, 15, 0.15)
+        border_color = (60, 0, 0, 0.5)  # Red border
+        text_color = (255, 255, 255) if hovering else (255, 255, 255)
+
+        # Reposition button in center
+        btn_width, btn_height = 240, 60
+        btn_x = self.surface.get_width() // 2 - btn_width // 2
+        btn_y = 320
+        self.game_over_button_rect = pygame.Rect(btn_x, btn_y, btn_width, btn_height)
+
+        # Draw background and border
+        pygame.draw.rect(self.surface, bg_color, self.game_over_button_rect)
+        pygame.draw.rect(self.surface, border_color, self.game_over_button_rect, 3)
+
+        # Render text and shadow
+        btn_text = self.button_font.render(btn_label, True, text_color)
+        shadow_text = self.button_font.render(btn_label, True, (0, 0, 0))
+
+        text_x = self.game_over_button_rect.centerx - btn_text.get_width() // 2
+        text_y = self.game_over_button_rect.centery - btn_text.get_height() // 2
+
+        self.surface.blit(shadow_text, (text_x + 2, text_y + 2))
+        self.surface.blit(btn_text, (text_x, text_y))
+
+
+    def enter_shop_screen(self):
+        self.in_shop = True
+        self.shop_selected_item_index = None
+        self.shop_message = ""
+        self.shop_items = [
+            ("Big Bomb", 300),
+            ("Shuffle", 200),
+            ("Hint", 150),
+            ("Freeze Time", 400)
+        ]
+        self.update()  # Trigger redraw
+
+    def draw_shop_overlay(self):
+        overlay = pygame.Surface(self.surface.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))  # translucent black
+        self.surface.blit(overlay, (0, 0))
+
+        font = pygame.font.SysFont("Arial", 24)
+        big_font = pygame.font.SysFont("Arial", 32)
+
+        # Title
+        title = big_font.render("🛒 Welcome to the Shop", True, (255, 255, 255))
+        self.surface.blit(title, (80, 60))
+
+        # Wallet
+        wallet = font.render(f"Wallet: {self.wallet} pts", True, (255, 255, 100))
+        self.surface.blit(wallet, (80, 100))
+
+        # Draw shop items
+        self.shop_button_rects = []
+        for i, (name, cost) in enumerate(self.shop_items):
+            y = 150 + i * 50
+            rect = pygame.Rect(80, y, 300, 40)
+            pygame.draw.rect(self.surface, (70, 100, 150), rect)
+            pygame.draw.rect(self.surface, (255, 255, 255), rect, 2)
+            label = font.render(f"{name} - {cost} pts", True, (255, 255, 255))
+            self.surface.blit(label, (90, y + 8))
+            self.shop_button_rects.append((rect, name, cost))
+
+        # Inventory view
+        self.surface.blit(font.render("🎒 Inventory:", True, (255, 255, 255)), (450, 150))
+        for i in range(5):
+            x = 450 + i * 60
+            y = 190
+            rect = pygame.Rect(x, y, 50, 50)
+            pygame.draw.rect(self.surface, (80, 80, 80), rect)
+            pygame.draw.rect(self.surface, (200, 200, 200), rect, 2)
+            item = self.inventory[i] if i < len(self.inventory) else None
+            if item:
+                icon = font.render(item[0], True, (255, 255, 255))  # Just the first letter
+                self.surface.blit(icon, (x + 10, y + 10))
+            self.button_rects[f"inventory_{i}"] = rect
+
+        # Continue button
+        continue_rect = pygame.Rect(80, 400, 200, 40)
+        pygame.draw.rect(self.surface, (100, 200, 100), continue_rect)
+        pygame.draw.rect(self.surface, (255, 255, 255), continue_rect, 2)
+        self.surface.blit(font.render("Continue to Next Round", True, (0, 0, 0)), (90, 410))
+        self.button_rects["shop_continue"] = continue_rect
+
+        # Message
+        if self.shop_message:
+            msg = font.render(self.shop_message, True, (255, 100, 100))
+            self.surface.blit(msg, (80, 460))
+
+    def attempt_purchase(self, name, cost):
+        if self.wallet < cost:
+            self.shop_message = "Not enough points!"
+            return
+
+        for i in range(5):
+            if i >= len(self.inventory) or self.inventory[i] is None:
+                if i >= len(self.inventory):
+                    self.inventory.append(name)
+                else:
+                    self.inventory[i] = name
+                self.wallet -= cost
+                self.shop_message = f"Bought {name}!"
+                return
+
+        self.shop_message = "Inventory full!"
+
 
     def trigger_encounter_effect(self):
         try:
@@ -1630,6 +2031,7 @@ class MahjongGame(QWidget):
         for tile in self.board:
             key = (tile["grid_x"], tile["grid_y"], tile["z"])
             self.tile_positions[key] = tile
+
 
 
 if __name__ == "__main__":
