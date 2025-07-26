@@ -939,6 +939,8 @@ class MahjongGame:
         print("[DEBUG] Score increased by 100.")
 
 
+
+
 if __name__ == "__main__":
     root = tk.Tk()
     MahjongGame(root)
