@@ -4,9 +4,19 @@ import random
 import pygame
 import time
 import math
+import json
 import traceback
 import logging
 from logging.handlers import RotatingFileHandler
+
+def get_base_dir():
+    if getattr(sys, 'frozen', False):
+        # If bundled by PyInstaller or similar
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
+
+BASE_DIR = get_base_dir()
 
 # Setup logging
 log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
@@ -36,23 +46,24 @@ from PyQt5 import QtGui, QtCore
 from matplotlib import cm
 from matplotlib.colors import Normalize
 
-from assets.fx.particle import SmokeParticle, SparkleParticle, FireParticle, WindParticle
+from assets.fx.particle import SmokeParticle, SparkleParticle, FireParticle, WindParticle, SelectedParticle
 from music import MusicManager
 
 
 TILES_ROOT = "./assets/tiles/classic"
 BG_ROOT = "./assets/bg"
+ITEMS = "./assets/items/shop_items.json"
 TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH = 64, 96, 6
 PAIR_COUNT = 7
 STACK_HEIGHT = 4
 NUM_ROWS = 6
 
 tile_particle_map = {
-    "Tower": SmokeParticle,
-    "Star": SparkleParticle,
-    "Sun": FireParticle,
-    "Moon": SparkleParticle,
-    "Devil": SmokeParticle,
+    "death": SmokeParticle,
+    "fool": SparkleParticle,
+    "sun": FireParticle,
+    "moon": SparkleParticle,
+    "devil": FireParticle,
 }
 
 class MahjongGame(QWidget):
@@ -160,7 +171,7 @@ class MahjongGame(QWidget):
             self.bg_scroll_speed_y = 0.25
 
 
-            self.surface = pygame.Surface((900, 900))
+            self.surface = pygame.Surface((1500, 900))
 
             self.tile_images = {}
             self.load_tileset_images()
@@ -224,6 +235,10 @@ class MahjongGame(QWidget):
         # end_round.clicked.connect(self.start_new_round)
         end_round.clicked.connect(self.update_game_state)
         btns.addWidget(end_round)
+
+        go_to_shop = QPushButton("Go to Shop")
+        go_to_shop.clicked.connect(self.enter_shop_screen)
+        btns.addWidget(go_to_shop)
 
         trigger_encounter = QPushButton("Trigger Encounter")
         trigger_encounter.clicked.connect(self.trigger_encounter_effect)
@@ -406,11 +421,18 @@ class MahjongGame(QWidget):
 
         # 🧩 Match Count
         matches_surface = font.render(f"Possible Matches: {self.get_possible_match_count()}", True, (180, 180, 255))
-        self.surface.blit(matches_surface, (surface_w - 250, bar_y + 10))
+        self.surface.blit(matches_surface, (surface_w - 250, bar_y - 50))
 
         # 🎵 Music Controls
-        music_label = font.render("Music", True, (255, 255, 255))
-        self.surface.blit(music_label, (padding + 250, bar_y + 10))
+        try:
+            track_file = self.music_manager.get_current_track_name()
+            current_track_name = os.path.splitext(os.path.basename(track_file))[0]
+        except Exception as e:
+            current_track_name = "No Track"
+            print(f"[MUSIC ERROR] Failed to get current track name: {e}")
+
+        track_label = font.render(current_track_name, True, (255, 255, 255))
+        self.surface.blit(track_label, (padding + 250, bar_y + 10))
 
         button_size = 40  # or whatever size your buttons are
 
@@ -458,14 +480,14 @@ class MahjongGame(QWidget):
         )
 
         # 🎒 Inventory (5 slots)
-        slot_w = 48
         slot_margin = 10
+        slot_w = TILE_WIDTH
+        slot_h = TILE_HEIGHT
         start_x = surface_w - (slot_w + slot_margin) * 5 - padding
-        slot_y = bar_y + 50
-
+        slot_y = bar_y - 10
 
         for i in range(5):
-            rect = pygame.Rect(start_x + i * (slot_w + slot_margin), slot_y, slot_w, slot_w)
+            rect = pygame.Rect(start_x + i * (slot_w + slot_margin), slot_y, slot_w, slot_h)
             is_hovered = (i == self.hovered_inventory_index)
             is_selected = (i == self.selected_inventory_index)
 
@@ -476,9 +498,18 @@ class MahjongGame(QWidget):
             pygame.draw.rect(self.surface, bg_color, rect)
             pygame.draw.rect(self.surface, border_color, rect, 2)
 
-            # Draw icon/placeholder (optional)
-            # pygame.draw.circle(self.surface, (255, 255, 255), rect.center, 10)
+            # Draw item icon if present
+            if i < len(self.inventory):
+                inv_item = self.inventory[i]
+                icon_path = inv_item.get("image", None)
+                if icon_path:
+                    full_path = os.path.join(BASE_DIR, icon_path)
+                    if os.path.exists(full_path):
+                        icon = pygame.image.load(full_path).convert_alpha()
+                        icon = pygame.transform.scale(icon, (slot_w - 4, slot_h - 4))
+                        self.surface.blit(icon, (rect.x + 2, rect.y + 2))
 
+            # Register interaction area
             self.button_rects[f"inventory_{i}"] = rect
 
     def mousePressEvent(self, event):
@@ -533,10 +564,12 @@ class MahjongGame(QWidget):
 
         # Shop item buttons (outside button_rects)
         if self.in_shop:
-            for rect, name, cost in getattr(self, "shop_button_rects", []):
+            for rect, item in getattr(self, "shop_button_rects", []):
                 if rect.collidepoint(x, y):
-                    print(f"[CLICK] Attempting to buy {name}")
-                    self.attempt_purchase(name, cost)
+                    name = item.get("title", "???")
+                    cost = item.get("cost", 999)
+                    print(f"[CLICK] Attempting to buy {name} for {cost}")
+                    self.attempt_purchase(item)
                     return
 
         if self.in_game_over:
@@ -549,6 +582,7 @@ class MahjongGame(QWidget):
 
         # Tile selection fallback
         self.handle_click(event)
+
 
     def handle_mouse_up(self, event):
         self.dragging_volume = False
@@ -662,10 +696,6 @@ class MahjongGame(QWidget):
         self.shop_message = ""
         self.shop_items = []
 
-        # Transfer leftover points
-        leftover = self.score - self.target_score
-        if leftover > 0:
-            self.wallet += leftover
 
         # Reset score and round info
         self.score = 0
@@ -871,8 +901,11 @@ class MahjongGame(QWidget):
             if img:
                 self.surface.blit(img, (tile["x"], tile["y"]))
                 if tile in self.selected_tiles:
-                    pygame.draw.rect(self.surface, (255, 255, 0),
-                                     (tile["x"], tile["y"], TILE_WIDTH, TILE_HEIGHT), 3)
+                    for _ in range(3):
+                        self.particles.append(SelectedParticle(tile["x"], tile["y"], TILE_WIDTH, TILE_HEIGHT))
+
+                    # pygame.draw.rect(self.surface, (255, 0, 0),
+                    #                  (tile["x"], tile["y"], TILE_WIDTH, TILE_HEIGHT), 3)
 
         # Phase 3: Draw newly exposed tiles that are becoming topmost
         exposed_tiles = [
@@ -1164,89 +1197,194 @@ class MahjongGame(QWidget):
         self.surface.blit(shadow_text, (text_x + 2, text_y + 2))
         self.surface.blit(btn_text, (text_x, text_y))
 
-
     def enter_shop_screen(self):
+        print("[SHOP] Entering shop screen...")
+
         self.in_shop = True
+
+        # Transfer leftover points
+        leftover = self.score - self.target_score
+        print(f"[SHOP] Calculated leftover points: {leftover}")
+        if leftover > 0:
+            self.wallet += leftover
+            print(f"[SHOP] Wallet updated: {self.wallet}")
+
         self.shop_selected_item_index = None
         self.shop_message = ""
-        self.shop_items = [
-            ("Big Bomb", 300),
-            ("Shuffle", 200),
-            ("Hint", 150),
-            ("Freeze Time", 400)
-        ]
-        self.update()  # Trigger redraw
+
+        # Load shop item pool
+        print(f"[SHOP] Attempting to load shop items from: {ITEMS}")
+        try:
+            with open(ITEMS, "r") as f:
+                all_items = json.load(f)
+                print(f"[SHOP] Loaded {len(all_items)} items from JSON.")
+
+                # Sanity check first few items
+                for idx, item in enumerate(all_items[:3]):
+                    print(f"[SHOP] Item {idx}: {item}")
+
+                k = min(4, len(all_items))
+                if k > 0:
+                    self.shop_items = random.sample(all_items, k=k)
+                    print(f"[SHOP] Selected {k} random shop items.")
+                else:
+                    print("[SHOP WARNING] No items found in JSON.")
+                    self.shop_items = []
+
+        except Exception as e:
+            print("[SHOP ERROR] Failed to load shop items.")
+            traceback.print_exc()
+            print(f"[SHOP ERROR] Exception: {e}")
+            self.shop_items = []
+
+        print("[SHOP] Shop screen setup complete. Calling update().")
+        self.update()
 
     def draw_shop_overlay(self):
-        overlay = pygame.Surface(self.surface.get_size(), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 180))  # translucent black
-        self.surface.blit(overlay, (0, 0))
+        try:
+            overlay = pygame.Surface(self.surface.get_size(), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 180))
+            self.surface.blit(overlay, (0, 0))
 
-        font = pygame.font.SysFont("Arial", 24)
-        big_font = pygame.font.SysFont("Arial", 32)
+            # Title
+            title = self.combo_font.render("Welcome to the Shop", True, (255, 255, 255))
+            self.surface.blit(title, (80, 60))
 
-        # Title
-        title = big_font.render("🛒 Welcome to the Shop", True, (255, 255, 255))
-        self.surface.blit(title, (80, 60))
+            # Wallet
+            wallet = self.combo_font.render(f"Wallet: {self.wallet} pts", True, (255, 255, 100))
+            self.surface.blit(wallet, (80, 100))
 
-        # Wallet
-        wallet = font.render(f"Wallet: {self.wallet} pts", True, (255, 255, 100))
-        self.surface.blit(wallet, (80, 100))
+            # Draw shop items
+            self.shop_button_rects = []
+            base_y = 150
+            for i, item in enumerate(self.shop_items):
+                name = item.get("title", "???")
+                cost = item.get("default_cost", 999)
+                img_path = item.get("image", None)
 
-        # Draw shop items
-        self.shop_button_rects = []
-        for i, (name, cost) in enumerate(self.shop_items):
-            y = 150 + i * 50
-            rect = pygame.Rect(80, y, 300, 40)
-            pygame.draw.rect(self.surface, (70, 100, 150), rect)
-            pygame.draw.rect(self.surface, (255, 255, 255), rect, 2)
-            label = font.render(f"{name} - {cost} pts", True, (255, 255, 255))
-            self.surface.blit(label, (90, y + 8))
-            self.shop_button_rects.append((rect, name, cost))
+                y = base_y + i * (TILE_HEIGHT + 30)
+                item_rect = pygame.Rect(80, y, 400, TILE_HEIGHT + 10)
 
-        # Inventory view
-        self.surface.blit(font.render("🎒 Inventory:", True, (255, 255, 255)), (450, 150))
-        for i in range(5):
-            x = 450 + i * 60
-            y = 190
-            rect = pygame.Rect(x, y, 50, 50)
-            pygame.draw.rect(self.surface, (80, 80, 80), rect)
-            pygame.draw.rect(self.surface, (200, 200, 200), rect, 2)
-            item = self.inventory[i] if i < len(self.inventory) else None
-            if item:
-                icon = font.render(item[0], True, (255, 255, 255))  # Just the first letter
-                self.surface.blit(icon, (x + 10, y + 10))
-            self.button_rects[f"inventory_{i}"] = rect
+                # Load and blit image
+                if img_path:
+                    full_path = os.path.normpath(os.path.join(BASE_DIR, img_path))
+                    if os.path.exists(full_path):
+                        icon = pygame.image.load(full_path).convert_alpha()
+                        icon = pygame.transform.scale(icon, (TILE_WIDTH, TILE_HEIGHT))
+                        self.surface.blit(icon, (90, y + 5))
+                    else:
+                        print(f"[SHOP WARNING] Icon not found at: {full_path}")
 
-        # Continue button
-        continue_rect = pygame.Rect(80, 400, 200, 40)
-        pygame.draw.rect(self.surface, (100, 200, 100), continue_rect)
-        pygame.draw.rect(self.surface, (255, 255, 255), continue_rect, 2)
-        self.surface.blit(font.render("Continue to Next Round", True, (0, 0, 0)), (90, 410))
-        self.button_rects["shop_continue"] = continue_rect
+                # Draw name & price
+                name_text = self.combo_font.render(name, True, (255, 255, 255))
+                cost_text = self.combo_font.render(f"{cost} pts", True, (255, 255, 100))
+                self.surface.blit(name_text, (100 + TILE_WIDTH, y + 5))
+                self.surface.blit(cost_text, (100 + TILE_WIDTH, y + TILE_HEIGHT // 2))
 
-        # Message
-        if self.shop_message:
-            msg = font.render(self.shop_message, True, (255, 100, 100))
-            self.surface.blit(msg, (80, 460))
+                self.shop_button_rects.append((item_rect, item))
 
-    def attempt_purchase(self, name, cost):
-        if self.wallet < cost:
-            self.shop_message = "Not enough points!"
-            return
+            # Fonts & Colors
+            btn_font = self.button_font  # or self.combo_font if consistent
+            btn_bg_color = (15, 15, 15, 38)  # Transparent dark
+            btn_border_color = (0, 60, 0, 128)  # Semi-transparent green
+            green_hover_color = (0, 125, 0)
+            shadow_color = (0, 0, 0)
 
-        for i in range(5):
-            if i >= len(self.inventory) or self.inventory[i] is None:
-                if i >= len(self.inventory):
-                    self.inventory.append(name)
-                else:
-                    self.inventory[i] = name
+            # Common Y position
+            button_y = 150 + len(self.shop_items) * (TILE_HEIGHT + 30) + 80
+            btn_height = 60
+            btn_shadow_offset = 2
+
+            # --- Reroll Button (Left) ---
+            reroll_width = 180
+            reroll_x = 80
+            reroll_rect = pygame.Rect(reroll_x, button_y, reroll_width, btn_height)
+            self.button_rects["shop_reroll"] = reroll_rect
+
+            # Hover check
+            hovering_reroll = reroll_rect.collidepoint(pygame.mouse.get_pos())
+            reroll_text_color = green_hover_color if hovering_reroll else green_hover_color
+
+            pygame.draw.rect(self.surface, btn_bg_color, reroll_rect)
+            pygame.draw.rect(self.surface, btn_border_color, reroll_rect, 3)
+
+            reroll_label = btn_font.render("Reroll (-50)", True, reroll_text_color)
+            reroll_shadow = btn_font.render("Reroll (-50)", True, shadow_color)
+            self.surface.blit(reroll_shadow, (reroll_rect.centerx - reroll_label.get_width() // 2 + btn_shadow_offset,
+                                              reroll_rect.centery - reroll_label.get_height() // 2 + btn_shadow_offset))
+            self.surface.blit(reroll_label, (reroll_rect.centerx - reroll_label.get_width() // 2,
+                                             reroll_rect.centery - reroll_label.get_height() // 2))
+
+            # --- Continue Button (Right) ---
+            continue_width = 260
+            continue_x = self.surface.get_width() - continue_width - 750
+            continue_rect = pygame.Rect(continue_x, button_y, continue_width, btn_height)
+            self.button_rects["shop_continue"] = continue_rect
+
+            hovering_continue = continue_rect.collidepoint(pygame.mouse.get_pos())
+            continue_text_color = (0, 125, 0) if hovering_continue else (0, 125, 0)
+
+            pygame.draw.rect(self.surface, btn_bg_color, continue_rect)
+            pygame.draw.rect(self.surface, btn_border_color, continue_rect, 3)
+
+            continue_label = btn_font.render("Continue", True, continue_text_color)
+            continue_shadow = btn_font.render("Continue", True, shadow_color)
+            self.surface.blit(continue_shadow,
+                              (continue_rect.centerx - continue_label.get_width() // 2 + btn_shadow_offset,
+                               continue_rect.centery - continue_label.get_height() // 2 + btn_shadow_offset))
+            self.surface.blit(continue_label, (continue_rect.centerx - continue_label.get_width() // 2,
+                                               continue_rect.centery - continue_label.get_height() // 2))
+
+            # Inventory view
+            self.surface.blit(self.combo_font.render("Inventory:", True, (255, 255, 255)), (500, 150))
+            for i in range(5):
+                x = 500 + i * (TILE_WIDTH + 10)
+                y = 190
+                rect = pygame.Rect(x, y, TILE_WIDTH, TILE_HEIGHT)
+                pygame.draw.rect(self.surface, (15, 15, 15), rect)
+                pygame.draw.rect(self.surface, (0, 60, 0), rect, 2)
+                if i < len(self.inventory):
+                    inv_item = self.inventory[i]
+                    icon_path = inv_item.get("image", None)
+                    if icon_path:
+                        full_path = os.path.join(BASE_DIR, icon_path)
+                        if os.path.exists(full_path):
+                            icon = pygame.image.load(full_path).convert_alpha()
+                            icon = pygame.transform.scale(icon, (TILE_WIDTH, TILE_HEIGHT))
+                            self.surface.blit(icon, (x, y))
+                self.button_rects[f"inventory_{i}"] = rect
+
+            # Continue Button (bottom right)
+            cont_width, cont_height = 240, 40
+            cont_x = self.surface.get_width() - cont_width - 40
+            cont_y = self.surface.get_height() - cont_height - 30
+
+
+            # Message
+            if self.shop_message:
+                msg = self.combo_font.render(self.shop_message, True, (255, 100, 100))
+                self.surface.blit(msg, (80, cont_y - 40))
+
+        except Exception as e:
+            import traceback
+            print("[DRAW SHOP ERROR]")
+            traceback.print_exc()
+
+    def attempt_purchase(self, item):
+        name = item.get("title", "???")
+        cost = item.get("cost", 999)
+
+        print(f"[PURCHASE] Wallet: {self.wallet}, Cost: {cost}")
+
+        if self.wallet >= cost:
+            if len(self.inventory) < 5:
                 self.wallet -= cost
-                self.shop_message = f"Bought {name}!"
-                return
-
-        self.shop_message = "Inventory full!"
-
+                self.inventory.append(item)
+                self.shop_message = f"Purchased {name}!"
+            else:
+                self.shop_message = "Inventory Full!"
+        else:
+            self.shop_message = "Not enough points!"
 
     def trigger_encounter_effect(self):
         try:

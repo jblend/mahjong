@@ -1,0 +1,34 @@
+[
+  {
+    "unique_id": "doppelganger",
+    "title": "Doppelganger",
+    "image": "assets/items/doppelganger.png",
+    "rarity": "common",
+    "cost": 300,
+    "description": "Destroys a large cluster of tiles."
+  },
+  {
+    "unique_id": "jerseydevil",
+    "title": "Jersey Devil",
+    "image": "assets/items/jerseydevil.png",
+    "rarity": "common",
+    "cost": 200,
+    "description": "Randomly rearranges the board."
+  },
+  {
+    "unique_id": "mothman",
+    "title": "Moth Man",
+    "image": "assets/items/mothman.png",
+    "rarity": "uncommon",
+    "cost": 150,
+    "description": "Highlights a valid matching pair."
+  },
+  {
+    "unique_id": "freeze_time",
+    "title": "Freeze Time",
+    "image": "assets/items/mothman.png",
+    "rarity": "rare",
+    "cost": 400,
+    "description": "Stops the timer for 15 seconds."
+  }
+]

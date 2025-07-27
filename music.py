@@ -5,6 +5,7 @@ class MusicManager:
     def __init__(self, music_folder):
         self.current_track = None
         self.music_folder = music_folder
+        self.track_list = [f for f in os.listdir(music_folder) if f.lower().endswith(('.mp3', '.ogg', '.wav'))]
         self.tracks = [
             os.path.join(music_folder, f)
             for f in os.listdir(music_folder)
@@ -21,7 +22,7 @@ class MusicManager:
         try:
             self.current_track = self.tracks[self.current_index]
             pygame.mixer.music.load(self.tracks[self.current_index])
-            pygame.mixer.music.play()
+            pygame.mixer.music.play(loops=-1)  # ← Loop forever
             print(f"[MUSIC] Now playing: {self.tracks[self.current_index]}")
         except Exception as e:
             print(f"[MUSIC ERROR] Could not play music: {e}")
@@ -40,3 +41,8 @@ class MusicManager:
     def handle_event(self, event):
         if event.type == pygame.USEREVENT + 1:
             self.next_track()  # Auto-play next when current ends
+
+    def get_current_track_name(self):
+        if self.track_list:
+            return self.track_list[self.current_index]
+        return "No Track"

@@ -6,6 +6,13 @@ import math
 TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH = 64, 96, 6
 INFERNO_CMAP = colormaps.get_cmap("inferno").reversed()
 PRISM_CMAP = colormaps.get_cmap("prism")
+LIGHT_RAY_COLOR_MAP = [
+    (255, 255, 255),   # Pure White
+    (240, 240, 200),   # Pale Yellow
+    (255, 250, 180),   # Warm Glow
+    (200, 200, 255),   # Cool Blue Tint
+    (255, 220, 200)    # Warm Peach Tint
+]
 
 class SmokeParticle:
     def __init__(self, x, y):
@@ -168,3 +175,64 @@ class WindParticle:
         surf = pygame.Surface((self.radius * 2, self.radius * 2), pygame.SRCALPHA)
         pygame.draw.circle(surf, (180, 220, 255, self.alpha), (self.radius, self.radius), self.radius)
         surface.blit(surf, (self.x - self.radius, self.y - self.radius))
+
+class SelectedParticle:
+    def __init__(self, x, y, width, height):
+        # Choose a perimeter edge for emission
+        edge = random.choice(["top", "bottom", "left", "right"])
+        if edge == "top":
+            self.x = x + random.uniform(0, width)
+            self.y = y
+        elif edge == "bottom":
+            self.x = x + random.uniform(0, width)
+            self.y = y + height
+        elif edge == "left":
+            self.x = x
+            self.y = y + random.uniform(0, height)
+        elif edge == "right":
+            self.x = x + width
+            self.y = y + random.uniform(0, height)
+
+        self.vx = 0
+        self.vy = random.uniform(-2.0, -1.2)
+        self.lifetime = random.randint(40, 50)
+        self.initial_alpha = random.randint(200, 255)
+        self.alpha = self.initial_alpha
+
+        self.stroke_color = random.choice([
+            # (255, 255, 100),  # warm yellow
+            (200, 255, 255),  # icy blue
+            # (255, 200, 240),  # pink tint
+            (180, 220, 255),  # soft cyan
+        ])
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.lifetime -= 1
+        self.alpha = int(self.initial_alpha * (self.lifetime / 60))
+        return self.is_alive()
+
+    def is_alive(self):
+        return self.lifetime > 0
+
+    def draw(self, surface):
+        if self.alpha <= 0:
+            return
+
+        # Create feathered 3x14 surface with transparent background
+        surf = pygame.Surface((3, 14), pygame.SRCALPHA)
+
+        # Outer feather (1px border)
+        feather_alpha = int(self.alpha * 0.25)
+        feather_color = (*self.stroke_color, feather_alpha)
+        pygame.draw.rect(surf, feather_color, pygame.Rect(0, 0, 3, 14), border_radius=1)
+
+        # Center white beam
+        white_color = (255, 255, 255, self.alpha)
+        pygame.draw.rect(surf, white_color, pygame.Rect(1, 1, 1, 12))  # Inner bright line
+
+        surface.blit(surf, (self.x - 1, self.y - 1))  # Offset to center the 3px beam
+
+
+
