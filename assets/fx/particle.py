@@ -2,6 +2,7 @@ import random
 import pygame
 from matplotlib import colormaps
 import math
+import logging
 
 TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH = 64, 96, 6
 INFERNO_CMAP = colormaps.get_cmap("inferno").reversed()
@@ -233,6 +234,52 @@ class SelectedParticle:
         pygame.draw.rect(surf, white_color, pygame.Rect(1, 1, 1, 12))  # Inner bright line
 
         surface.blit(surf, (self.x - 1, self.y - 1))  # Offset to center the 3px beam
+
+class ComboBand:
+    def __init__(self, x, y, width, height, color, duration, current_points=0, max_points=5):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.color = color
+        self.start_time = pygame.time.get_ticks()
+        self.duration = duration  # milliseconds
+        self.current_points = current_points
+        self.max_points = max_points
+        self.start_time = pygame.time.get_ticks()
+
+
+    def update(self):
+        elapsed = pygame.time.get_ticks() - self.start_time
+        self.progress = min(elapsed / self.duration, 1.0)
+        logging.debug(f"ComboBand progress: {self.progress:.2f}")
+
+    def draw(self, surface):
+        now = pygame.time.get_ticks()  # milliseconds
+        elapsed = now - self.start_time
+
+        burn_progress = min(elapsed / self.duration, 1.0)  # 0.0 to 1.0
+
+        # Calculate how wide the bar should be based on combo points
+        fill_ratio = self.current_points / self.max_points
+        fill_width = int(self.width * fill_ratio)
+
+        # How much of that bar is still burning
+        remaining_width = int(fill_width * (1.0 - burn_progress))
+
+        # Draw background fuse area
+        pygame.draw.rect(surface, (50, 50, 50), (self.x, self.y, self.width, self.height))
+
+        # Draw burning fuse
+        if remaining_width > 0:
+            burn_rect = pygame.Rect(self.x, self.y, remaining_width, self.height)
+            pygame.draw.rect(surface, self.color, burn_rect)
+
+
+
+
+
 
 
 
