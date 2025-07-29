@@ -9,6 +9,7 @@ import traceback
 import logging
 from logging.handlers import RotatingFileHandler
 from encounterengine import EncounterEngine
+from action_bar import ActionBar
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
@@ -85,6 +86,7 @@ class MahjongGame(QWidget):
         try:
             self.setWindowTitle("Mahjong Pygame + Qt5")
             self.setGeometry(100, 100, 1000, 800)
+            self.ACTION_BAR_HEIGHT = 80
             self.debug = False
             self.base_score = 5
             self.encounter_engine = EncounterEngine(self)
@@ -98,6 +100,15 @@ class MahjongGame(QWidget):
             self.board = []
             self.tile_positions = {}
             self.selected_tiles = []
+            self.animating_tiles = []
+            self.fading_matched_tiles = []
+
+            self.animating_tiles = []
+            self.fading_matched_tiles = []
+            self.animating_coords = set()
+            self.fading_coords = set()
+            self.top_tiles = {}
+
             self.matched_pairs = {}
             self.wallet = 0
             self.score = 0
@@ -118,8 +129,17 @@ class MahjongGame(QWidget):
 
 
             self.particles = []
+            self.fuse_particles = []
+            cmap = cm.get_cmap("inferno").reversed()
+            self.fuse_gradient = [tuple(int(c * 255) for c in cmap(i / 20)[:3]) for i in range(20)]
 
             # Combo timer
+            self.combo_fuse_x = 50
+            self.combo_fuse_y = 50
+            self.combo_fuse_total_width = 200
+            self.combo_fuse_height = 16
+
+
             self.combo_timer = QTimer()
             self.combo_timer.setInterval(10000)
             self.combo_timer.timeout.connect(self.reset_combo_timer)
@@ -141,7 +161,7 @@ class MahjongGame(QWidget):
 
             self.combo_display_text = ""
             self.combo_display_time = 0
-            self.combo_display_duration = 1000  # ms
+
 
             self.combo_anim = QPropertyAnimation(self.combo_label, b"pos")
             self.combo_anim.setDuration(500)
@@ -210,6 +230,8 @@ class MahjongGame(QWidget):
 
             self.tile_images = {}
             self.load_tileset_images()
+
+            self.action_bar = ActionBar(self)
 
             self.init_shop()
             self.init_ui()
@@ -304,7 +326,7 @@ class MahjongGame(QWidget):
 
     def modify_score(self, tile_name, base_points=5):
         self.combo_display_start = pygame.time.get_ticks()
-        self.combo_display_text = f" X {self.combo_level}!"
+        self.combo_display_text = f" X {self.combo_level}"
         self.combo_display_start = pygame.time.get_ticks()
         self.combo_end_time = self.combo_display_start + self.combo_display_duration  # 10 seconds
         self.combo_fade_duration = 20000  # ms fade out after timer ends
@@ -315,10 +337,10 @@ class MahjongGame(QWidget):
 
         # Set combo display
         if self.combo_multiplier > 1:
-            self.combo_display_text = f"Combo x{self.combo_level}!"
+            self.combo_display_text = f"X {self.combo_level}"
             self.combo_display_time = pygame.time.get_ticks()
 
-        self.add_combo_point()
+
 
         # Score calculation
         tile_multiplier = count
@@ -349,6 +371,25 @@ class MahjongGame(QWidget):
         b = int(rgba[2] * 255)
         return (r, g, b)
 
+    def update_fuse_gradient(self):
+        # Reversed inferno colormap
+        cmap = cm.get_cmap("inferno").reversed()
+
+        # Clamp combo_level between 1 and 10
+        clamped_level = max(1, min(self.combo_level, 10))
+
+        # Normalize range from 1 to 10
+        norm = Normalize(vmin=1, vmax=10)
+
+        # Sample the gradient from 1 up to the current combo level
+        levels = 20  # Number of discrete colors
+        max_ratio = norm(clamped_level)  # Get float in 0.0–1.0
+
+        self.fuse_gradient = [
+            tuple(int(c * 255) for c in cmap(i / (levels - 1) * max_ratio)[:3])
+            for i in range(levels)
+        ]
+
     def draw_combo_text(self):
 
         if not self.combo_display_text:
@@ -368,7 +409,7 @@ class MahjongGame(QWidget):
         else:
             return  # Combo fully expired, don't draw
 
-        color = self.get_combo_color(self.combo_multiplier)
+        color = self.get_combo_color(self.combo_level)
         text_surface = self.combo_font.render(self.combo_display_text, True, color)
         text_surface.set_alpha(alpha)
 
@@ -382,23 +423,28 @@ class MahjongGame(QWidget):
         self.combo_points += 1
 
         if not self.combo_bands:
-            # Create initial combo band if none exist
-            self.combo_bands.append(self._build_combo_band(self.combo_level, self.combo_points))
-            logging.debug("Created initial combo band")
+            self.start_new_combo_band(self.combo_points)
+            logging.debug("Started new combo band")
         else:
-            # Update the active band with new progress
-            self.combo_bands[-1].current_points = self.combo_points
-            self.combo_bands[-1].max_points = self.combo_required_per_level
+            self.combo_bands[-1].refresh(
+                current_points=self.combo_points,
+                max_points=self.combo_required_per_level
+            )
+            logging.debug("Refreshed existing combo band")
 
         if self.combo_level < self.combo_max_level:
             if self.combo_points >= self.combo_required_per_level:
-                old_points = self.combo_points  # Save before reset
                 self.combo_points = 0
                 self.combo_level += 1
                 self.combo_multiplier += 1
-                self.start_new_combo_band(points=old_points)  # Pass correct fill
+                self.update_fuse_gradient()
+                self.start_new_combo_band()
+                logging.debug(f"Leveled up combo: level={self.combo_level}, multiplier={self.combo_multiplier}")
 
         self.combo_timer.start()
+        self.combo_display_start = pygame.time.get_ticks()  # For time-based rendering
+
+        self.update()
 
     def create_or_update_combo_band(self):
         # Remove and recreate the most recent band with updated progress and fresh burn timer
@@ -421,44 +467,63 @@ class MahjongGame(QWidget):
         self.combo_multiplier = 1
         self.combo_matches = 0
 
-        # If no combo band exists, add one for level 0
-        if not self.combo_bands:
-            color = self.get_combo_color(1)
-            y = self.action_bar_top - 10
-            x = 20
-            width = self.surface.get_width() - 40
-            self.combo_display_duration = 10000  # 10 seconds in ms
-            band = ComboBand(x, y, width, 4, color, self.combo_display_duration,
-                             current_points=self.combo_points,
-                             max_points=self.combo_required_per_level)
-            self.combo_bands.append(band)
-            logging.debug("Created base combo band")
+        self.combo_bands.clear()  # Extinguish fuse band visually
+        logging.debug("[COMBO] Combo timer expired. Fuse extinguished.")
 
         self.update()
 
     def reset_combo(self):
         self.combo_points = 0
         self.combo_level = 0
-        self.combo_bands.clear()  # ✅ This is the right place
+        self.combo_matches = 0
+        self.combo_bands.clear()  # ✅ Clear fuse bands
+        self.combo_timer.stop()  # ✅ Stop the fuse countdown
+
+        # ✅ Clear combo display
+        self.combo_display_text = ""
+        self.combo_display_time = 0
+        self.combo_label.hide()  # Hide the Qt label if you're using it
+
+        # ✅ Optionally reset combo multiplier and score display
+        self.combo_multiplier = 1
+
+        # ✅ Force UI update if needed
+        self.update()
 
     def start_new_combo_band(self, points=None):
-        if points is None:
-            points = self.combo_points
+        if points is None or points == 0:
+            points = 1  # Start at 20% minimum when creating a new band
 
         color = self.get_combo_color(self.combo_level)
         y = self.action_bar_top - 10
         x = 20
         width = self.surface.get_width() - 40
 
-        fill_ratio = points / self.combo_required_per_level
-        band = ComboBand(x, y, width, 4, color, self.combo_display_duration,
-                         current_points=points, max_points=self.combo_required_per_level)
+        # Clamp to prevent overfilling
+        points = max(1, min(points, self.combo_required_per_level))
+
+        band = ComboBand(
+            x, y, width, 4, color,
+            self.combo_display_duration,
+            current_points=points,
+            max_points=self.combo_required_per_level
+        )
         self.combo_bands.append(band)
-        logging.debug("Created new combo band with fill %.2f" % fill_ratio)
+        logging.debug(
+            f"Created new combo band with {points} points (fill {points / self.combo_required_per_level:.2f})")
 
     def draw_combo_fuse(self):
         for band in self.combo_bands:
-            band.draw(self.surface)
+            band.draw(self.surface, self.fuse_particles, self.fuse_gradient)
+
+        # Update/draw fuse particles
+        alive_fuse_particles = []
+        for p in self.fuse_particles:
+            p.update()
+            p.draw(self.surface)
+            if p.alpha > 0:
+                alive_fuse_particles.append(p)
+        self.fuse_particles = alive_fuse_particles
 
 
     def draw_score_text(self):
@@ -472,6 +537,7 @@ class MahjongGame(QWidget):
 
         score_rect = score_surface.get_rect(center=(self.surface.get_width() // 2,
                                                     combo_y_offset + padding))
+
         self.surface.blit(score_surface, score_rect)
 
     def reset_round_score_state(self):
@@ -497,132 +563,6 @@ class MahjongGame(QWidget):
         self.fading_matched_tiles = []
         self.animating_tiles = []
         self._vacated_during_animation = set()
-
-    def draw_action_bar(self):
-        surface_w = self.surface.get_width()
-        surface_h = self.surface.get_height()
-        bar_y = surface_h - 100
-        padding = 20
-
-        # Fonts
-        font = self.gui_font
-
-        # 🧮 Score
-        score_surface = font.render(f"Score: {self.score}", True, (255, 255, 255))
-        self.surface.blit(score_surface, (padding, bar_y + 10))
-
-        # 💰 Wallet
-        wallet_surface = font.render(f"Wallet: {self.wallet}", True, (200, 200, 100))
-        self.surface.blit(wallet_surface, (padding, bar_y + 45))
-
-        # 🔥 Combo (if active)
-        now = pygame.time.get_ticks()
-        if self.combo_display_text and now < self.combo_end_time + self.combo_fade_duration:
-            alpha = 255
-            if now > self.combo_end_time:
-                fade_elapsed = now - self.combo_end_time
-                progress = fade_elapsed / self.combo_fade_duration
-                alpha = int(255 * (1 - progress ** 2))
-
-            combo_color = self.get_combo_color(self.combo_multiplier)
-            combo_surface = font.render(self.combo_display_text, True, combo_color)
-            combo_surface.set_alpha(alpha)
-            combo_rect = combo_surface.get_rect(center=(surface_w // 2, bar_y - 10))
-
-            self.surface.blit(combo_surface, combo_rect)
-
-        # 🧩 Match Count
-        matches_surface = font.render(f"Possible Matches: {self.get_possible_match_count()}", True, (180, 180, 255))
-        self.surface.blit(matches_surface, (surface_w - 250, bar_y - 50))
-
-        # 🎵 Music Controls
-        try:
-            track_file = self.music_manager.get_current_track_name()
-            current_track_name = os.path.splitext(os.path.basename(track_file))[0]
-        except Exception as e:
-            current_track_name = "No Track"
-            print(f"[MUSIC ERROR] Failed to get current track name: {e}")
-
-        track_label = font.render(current_track_name, True, (255, 255, 255))
-        self.surface.blit(track_label, (padding + 250, bar_y + 10))
-
-        button_size = 40  # or whatever size your buttons are
-
-        # ⏮️ Previous Track
-        prev_rect = pygame.Rect(padding + 250, bar_y + 45, button_size, button_size)
-        pygame.draw.rect(self.surface, (60, 60, 60), prev_rect)
-        pygame.draw.rect(self.surface, (15, 15, 15), prev_rect, 2)
-        scaled_prev = pygame.transform.smoothscale(self.icon_images["prev"], (button_size - 10, button_size - 10))
-        prev_icon_rect = scaled_prev.get_rect(center=prev_rect.center)
-        self.surface.blit(scaled_prev, prev_icon_rect)
-        self.button_rects["prev_track"] = prev_rect
-
-        # ⏭️ Next Track
-        next_rect = pygame.Rect(padding + 250 + 50, bar_y + 45, button_size, button_size)
-        pygame.draw.rect(self.surface, (60, 60, 60), next_rect)
-        pygame.draw.rect(self.surface, (15, 15, 15), next_rect, 2)
-        scaled_next = pygame.transform.smoothscale(self.icon_images["next"], (button_size - 10, button_size - 10))
-        next_icon_rect = scaled_next.get_rect(center=next_rect.center)
-        self.surface.blit(scaled_next, next_icon_rect)
-        self.button_rects["next_track"] = next_rect
-
-        # 🔊 Volume Slider (horizontal bar with knob)
-        vol_x = padding + 360
-        vol_y = bar_y + 60
-        vol_width = 100
-        vol_height = 6
-        vol_knob_radius = 6
-        pygame.draw.rect(self.surface, (150, 150, 150), (vol_x, vol_y, vol_width, vol_height))
-        knob_x = vol_x + int(self.music_volume * vol_width)
-        pygame.draw.circle(self.surface, (255, 255, 255), (knob_x, vol_y + vol_height // 2), vol_knob_radius)
-
-        # Volume icon (optional)
-        volume_icon = self.icon_images["volume"]
-        self.surface.blit(volume_icon, (vol_x - 20, vol_y - 4))
-
-        self.button_rects["volume_slider"] = pygame.Rect(vol_x, vol_y - vol_knob_radius, vol_width, vol_knob_radius * 2)
-
-        # Knob position
-        knob_x = vol_x + int(self.music_volume * vol_width)
-        pygame.draw.circle(self.surface, (255, 255, 255), (knob_x, vol_y + vol_height // 2), vol_knob_radius)
-
-        # Interaction rect
-        self.button_rects["volume_slider"] = pygame.Rect(
-            vol_x, vol_y - vol_knob_radius, vol_width, vol_knob_radius * 2
-        )
-
-        # 🎒 Inventory (5 slots)
-        slot_margin = 10
-        slot_w = TILE_WIDTH
-        slot_h = TILE_HEIGHT
-        start_x = surface_w - (slot_w + slot_margin) * 5 - padding
-        slot_y = bar_y - 10
-
-        for i in range(5):
-            rect = pygame.Rect(start_x + i * (slot_w + slot_margin), slot_y, slot_w, slot_h)
-            is_hovered = (i == self.hovered_inventory_index)
-            is_selected = (i == self.selected_inventory_index)
-
-            # Background
-            bg_color = (100, 100, 100) if is_selected else (80, 80, 80)
-            border_color = (255, 255, 0) if is_hovered else (200, 200, 200)
-
-            pygame.draw.rect(self.surface, bg_color, rect)
-            pygame.draw.rect(self.surface, border_color, rect, 2)
-
-            # Draw item icon if present
-            if i < len(self.inventory):
-                inv_item = self.inventory[i]
-                icon_path = inv_item.get("image", None)
-                if icon_path:
-                    full_path = os.path.join(BASE_DIR, icon_path)
-                    if os.path.exists(full_path):
-                        icon = pygame.image.load(full_path).convert_alpha()
-                        icon = pygame.transform.scale(icon, (slot_w - 4, slot_h - 4))
-                        self.surface.blit(icon, (rect.x + 2, rect.y + 2))
-
-            # Register interaction area
-            self.button_rects[f"inventory_{i}"] = rect
 
     def mousePressEvent(self, event):
         x = event.pos().x()
@@ -802,6 +742,8 @@ class MahjongGame(QWidget):
     def start_new_game(self):
         print("[ROUND] Starting next round...")
 
+        self.reset_combo()
+
         # Exit shop
         self.in_shop = False
         self.selected_inventory_index = None
@@ -939,6 +881,180 @@ class MahjongGame(QWidget):
 
     def update_canvas(self):
         ACTION_BAR_HEIGHT = 100
+        self.clear_background()
+        self.draw_background_tiles()
+        self.draw_tile_shadows()
+        self.draw_top_static_tiles()
+        self.draw_exposed_tiles()
+        self.draw_animating_tiles()
+        self.draw_fading_tiles()
+        self.draw_fog_of_war()
+        self.draw_combo_fuse()
+        self.action_bar.draw()  # External call to encapsulated class
+        self.draw_particles()
+        self.draw_overlays()
+        self.blit_to_qt()
+
+    def draw_top_static_tiles(self):
+        # Get safely initialized lists/sets
+        animating_tiles = getattr(self, "animating_tiles", [])
+        fading_tiles = getattr(self, "fading_matched_tiles", [])
+
+        animating_coords = set((t["grid_x"], t["grid_y"], t["z"]) for t in animating_tiles)
+        fading_coords = set((t["grid_x"], t["grid_y"], t["z"]) for t in fading_tiles)
+
+        top_tiles = {}
+        for tile in self.board:
+            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
+            if (gx, gy, gz) in animating_coords or (gx, gy, gz) in fading_coords:
+                continue
+            key = (gx, gy)
+            if key not in top_tiles or gz > top_tiles[key]["z"]:
+                top_tiles[key] = tile
+
+        for tile in sorted(top_tiles.values(), key=lambda t: t["z"]):
+            img = self.tile_images.get(tile["name"])
+            if img:
+                self.surface.blit(img, (tile["x"], tile["y"]))
+                if tile in self.selected_tiles:
+                    for _ in range(3):
+                        self.particles.append(SelectedParticle(tile["x"], tile["y"], TILE_WIDTH, TILE_HEIGHT))
+
+    def draw_exposed_tiles(self):
+        exposed_tiles = [
+            tile for tile in self.board
+            if tile.get("will_become_exposed") and
+               (tile["grid_x"], tile["grid_y"]) not in self.top_tiles
+        ]
+        exposed_tiles.sort(key=lambda t: t["z"])
+        for tile in exposed_tiles:
+            img = self.tile_images.get(tile["name"])
+            if img:
+                temp_img = img.copy()
+                temp_img.set_alpha(tile.get("alpha", 255))
+                self.surface.blit(temp_img, (tile["x"], tile["y"]))
+
+    def draw_animating_tiles(self):
+        for tile in self.animating_tiles:
+            if (tile["grid_x"], tile["grid_y"], tile["z"]) not in self.fading_coords:
+                img = self.tile_images.get(tile["name"])
+                if img:
+                    temp_img = img.copy()
+                    temp_img.set_alpha(tile.get("alpha", 255))
+                    self.surface.blit(temp_img, (tile["x"], tile["y"]))
+
+    def draw_fading_tiles(self):
+        now = pygame.time.get_ticks()
+        done = []
+        for tile in self.fading_matched_tiles:
+            elapsed = now - tile["fade_start"]
+            progress = min(1.0, elapsed / tile["fade_duration"])
+            alpha = int(255 * (1 - progress))
+            img = self.tile_images.get(tile["name"])
+            if img:
+                temp_img = img.copy()
+                temp_img.set_alpha(alpha)
+                self.surface.blit(temp_img, (tile["x"], tile["y"]))
+            if progress >= 1.0:
+                done.append(tile)
+        for tile in done:
+            self.board.remove(tile)
+            self.tile_positions.pop((tile["grid_x"], tile["grid_y"], tile["z"]), None)
+            self.fading_matched_tiles.remove(tile)
+        for tile in self.board:
+            if tile.get("will_become_exposed"):
+                tile.pop("will_become_exposed")
+
+    def draw_tile_shadows(self):
+        vacated = getattr(self, "_vacated_during_animation", set())
+        top_tiles = {
+            (tile["grid_x"], tile["grid_y"]): tile
+            for tile in self.board
+            if
+            tile not in self.animating_tiles and (tile["grid_x"], tile["grid_y"], tile["z"]) not in self.fading_coords
+        }
+
+        for tile in self.board:
+            gx, gy = tile["grid_x"], tile["grid_y"]
+            if (gx, gy) in vacated:
+                continue
+            top = top_tiles.get((gx, gy))
+            if top and top["z"] > tile["z"]:
+                shadow = pygame.Surface((TILE_WIDTH, TILE_HEIGHT), pygame.SRCALPHA)
+                shadow.fill((0, 0, 0, 200))
+                self.surface.blit(shadow, (tile["x"], tile["y"]))
+
+    def clear_background(self):
+        self.surface.fill((0, 80, 80))
+
+    def draw_background_tiles(self):
+        tile_w, tile_h = self.background_tile.get_size()
+        surface_w, surface_h = self.surface.get_size()
+        start_x = -int(self.bg_scroll_x)
+        start_y = -int(self.bg_scroll_y)
+
+        for x in range(start_x, surface_w, tile_w):
+            for y in range(start_y, surface_h, tile_h):
+                self.surface.blit(self.background_tile, (x, y))
+
+    def draw_particles(self):
+        alive_particles = []
+        for p in self.particles:
+            if p.update():
+                p.draw(self.surface)
+                alive_particles.append(p)
+        self.particles = alive_particles
+
+    def draw_overlays(self):
+        if self.in_shop:
+            self.draw_shop_overlay()
+        if self.in_game_over:
+            self.draw_game_over_overlay()
+
+    def blit_to_qt(self):
+        raw_data = pygame.image.tostring(self.surface, "RGB")
+        image = QPixmap.fromImage(
+            QImage(raw_data, self.surface.get_width(), self.surface.get_height(), QImage.Format_RGB888)
+        )
+        self.canvas_label.setPixmap(image)
+
+    def draw_fog_of_war(self):
+        try:
+            fog_surface = pygame.Surface((TILE_WIDTH, TILE_HEIGHT), pygame.SRCALPHA)
+            fog_surface.fill((0, 0, 0, 220))
+            visible_set = {(t["grid_x"], t["grid_y"], t["z"]) for t in self.get_selectable_tiles()}
+            visible_set.update(
+                (t["grid_x"], t["grid_y"], t["z"])
+                for t in self.board if t.get("will_become_exposed")
+            )
+            visibility_cutoff_y = {}
+            for tile in self.board:
+                gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
+                if (gx, gy, gz) in visible_set:
+                    visibility_cutoff_y[(gx, gy)] = min(
+                        visibility_cutoff_y.get((gx, gy), float("inf")),
+                        tile["y"]
+                    )
+            for (gx, gy), tile in self.top_tiles.items():
+                if (gx, gy, tile["z"]) in visible_set:
+                    continue
+                fog_top = tile["y"]
+                fog_bottom = tile["y"] + TILE_HEIGHT
+                cutoff_y = visibility_cutoff_y.get((gx, gy))
+                if cutoff_y is not None and cutoff_y < fog_bottom:
+                    fog_height = cutoff_y - fog_top
+                    if fog_height > 0:
+                        partial_fog = pygame.Surface((TILE_WIDTH, fog_height), pygame.SRCALPHA)
+                        partial_fog.fill((0, 0, 0, 220))
+                        self.surface.blit(partial_fog, (tile["x"], fog_top))
+                else:
+                    self.surface.blit(fog_surface, (tile["x"], tile["y"]))
+        except Exception as e:
+            print(f"[FOG ERROR] {e}")
+
+
+    def update_canvas_2(self):
+
         self.surface.fill((0, 80, 80))  # Background
 
         # Draw action bar background at the bottom
@@ -1138,11 +1254,14 @@ class MahjongGame(QWidget):
         # self.draw_score_text()
         # self.draw_combo_text()
 
-        self.draw_action_bar()
 
+
+        # Phase 6: Draw combo fuse
         self.draw_combo_fuse()
 
-        # Phase 7: Update and draw particles
+        self.action_bar.draw()
+
+        # Phase 7: Update and draw tile-match particles
         alive_particles = []
         for p in self.particles:
             if p.update():

@@ -1,6 +1,7 @@
 import random
 import pygame
 from matplotlib import colormaps
+import matplotlib.colors as mcolors
 import math
 import logging
 
@@ -237,46 +238,84 @@ class SelectedParticle:
 
 class ComboBand:
     def __init__(self, x, y, width, height, color, duration, current_points=0, max_points=5):
-        self.rect = pygame.Rect(x, y, width, height)
         self.x = x
         self.y = y
         self.width = width
         self.height = height
         self.color = color
-        self.start_time = pygame.time.get_ticks()
-        self.duration = duration  # milliseconds
+        self.duration = duration  # in ms
         self.current_points = current_points
         self.max_points = max_points
         self.start_time = pygame.time.get_ticks()
 
+    def is_active(self):
+        return pygame.time.get_ticks() - self.start_time <= self.duration
 
-    def update(self):
-        elapsed = pygame.time.get_ticks() - self.start_time
-        self.progress = min(elapsed / self.duration, 1.0)
-        logging.debug(f"ComboBand progress: {self.progress:.2f}")
+    def refresh(self, current_points=None, max_points=None):
+        """Update fuse fill and restart burn."""
+        if current_points is not None:
+            self.current_points = current_points
+        if max_points is not None:
+            self.max_points = max_points
+        self.start_time = pygame.time.get_ticks()  # Reset the fuse burn
 
-    def draw(self, surface):
-        now = pygame.time.get_ticks()  # milliseconds
+    def draw(self, surface, particles, gradient=None):
+        now = pygame.time.get_ticks()
         elapsed = now - self.start_time
 
-        burn_progress = min(elapsed / self.duration, 1.0)  # 0.0 to 1.0
+        if elapsed > self.duration:
+            return
 
-        # Calculate how wide the bar should be based on combo points
-        fill_ratio = self.current_points / self.max_points
+        burn_progress = min(elapsed / self.duration, 1.0)
+        fill_ratio = min(self.current_points / self.max_points, 1.0)
         fill_width = int(self.width * fill_ratio)
-
-        # How much of that bar is still burning
         remaining_width = int(fill_width * (1.0 - burn_progress))
 
-        # Draw background fuse area
+        # Draw background bar
         pygame.draw.rect(surface, (50, 50, 50), (self.x, self.y, self.width, self.height))
 
-        # Draw burning fuse
         if remaining_width > 0:
             burn_rect = pygame.Rect(self.x, self.y, remaining_width, self.height)
             pygame.draw.rect(surface, self.color, burn_rect)
 
+            # Emit 1 particle per draw cycle at burn tip (avoid duplicates here!)
+            if gradient:
+                particle_color = random.choice(gradient)
+            else:
+                particle_color = self.color
 
+            tip_x = self.x + remaining_width
+            tip_y = self.y + self.height // 2
+
+            # Only emit a particle with some throttling (e.g., every 50ms)
+            if not hasattr(self, "last_emit_time"):
+                self.last_emit_time = 0
+            if now - self.last_emit_time > 50:
+                particles.append(FuseParticle(tip_x, tip_y, particle_color))
+                self.last_emit_time = now
+
+
+class FuseParticle:
+    def __init__(self, x, y, color):
+        self.x = x
+        self.y = y
+        self.vx = random.uniform(-0.5, 0.5)
+        self.vy = random.uniform(-1.5, -0.5)
+        self.alpha = 255
+        self.color = color
+        self.radius = random.randint(1, 2)
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.alpha -= 5  # Fade out
+
+    def draw(self, surface):
+        if self.alpha > 0:
+            surface_color = (*self.color[:3], max(0, min(255, int(self.alpha))))
+            s = pygame.Surface((self.radius * 2, self.radius * 2), pygame.SRCALPHA)
+            pygame.draw.circle(s, surface_color, (self.radius, self.radius), self.radius)
+            surface.blit(s, (self.x, self.y))
 
 
 
