@@ -31,17 +31,55 @@ class ActionBar:
         self.__draw_music_controls()
         self.__draw_volume_slider()
         self.__draw_inventory_slots()
+        self.__draw_encounter_info()
 
     def __draw_score_and_wallet(self):
         font = self.gui_font
         bar_y = self.surface.get_height() - 100
         padding = 20
 
+        # Draw Target Score above score
+        target_surface = self.gui_font.render(f"Target: {self.game.target_score}", True, (255, 180, 120))
+        self.surface.blit(target_surface, (padding, bar_y - 20))
+
         score_surface = font.render(f"Score: {self.game.score}", True, (255, 255, 255))
         wallet_surface = font.render(f"Wallet: {self.game.wallet}", True, (200, 200, 100))
 
         self.surface.blit(score_surface, (padding, bar_y + 10))
         self.surface.blit(wallet_surface, (padding, bar_y + 45))
+
+    def __draw_encounter_info(self):
+        if not self.game.encounter_mode:
+            return
+
+        font = self.gui_font
+        surface_w = self.surface.get_width()
+        bar_y = self.surface.get_height() - 100
+        padding = 20
+
+        # Convert encounter name to Camel Case
+        encounter_name = self.game.encounter_mode.replace('_', ' ').title()
+
+        turns_remaining = self.game.encounter_trigger_in
+        if turns_remaining == 1:
+            turns_string = "Turn"
+        else:
+            turns_string = "Turns"
+
+        encounter_text = f"Encounter: {encounter_name} Will Trigger In {turns_remaining} {turns_string}"
+
+        # Render the text surface
+        encounter_surface = font.render(encounter_text, True, (255, 150, 150))
+
+        # === POSITIONING ===
+        x_offset = 600  # ➡️ Increase to move right, decrease to move left
+        y_offset = -20  # ⬇️ Increase to move down, decrease to move up
+
+        # Final draw position
+        draw_x = padding + x_offset
+        draw_y = bar_y + y_offset
+
+        self.surface.blit(encounter_surface, (draw_x, draw_y))
 
     def __draw_combo_display(self):
         now = pygame.time.get_ticks()

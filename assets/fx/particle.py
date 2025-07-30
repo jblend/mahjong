@@ -197,7 +197,7 @@ class SelectedParticle:
 
         self.vx = 0
         self.vy = random.uniform(-2.0, -1.2)
-        self.lifetime = random.randint(40, 50)
+        self.lifetime = random.randint(10, 25)
         self.initial_alpha = random.randint(200, 255)
         self.alpha = self.initial_alpha
 
@@ -228,13 +228,72 @@ class SelectedParticle:
         # Outer feather (1px border)
         feather_alpha = int(self.alpha * 0.25)
         feather_color = (*self.stroke_color, feather_alpha)
-        pygame.draw.rect(surf, feather_color, pygame.Rect(0, 0, 3, 14), border_radius=1)
+        pygame.draw.rect(surf, feather_color, pygame.Rect(0, 0, 3, 14), border_radius=2)
 
         # Center white beam
         white_color = (255, 255, 255, self.alpha)
         pygame.draw.rect(surf, white_color, pygame.Rect(1, 1, 1, 12))  # Inner bright line
 
         surface.blit(surf, (self.x - 1, self.y - 1))  # Offset to center the 3px beam
+
+class SelectedParticle_B:
+    def __init__(self, x, y, width, height):
+        self.rect_x = x
+        self.rect_y = y
+        self.width = width
+        self.height = height
+
+        self.perimeter = 2 * (width + height)
+        self.perimeter_pos = random.uniform(0, self.perimeter)
+        self.speed = random.uniform(2.0, 4.5)
+
+        self.lifetime = random.randint(50, 70)
+        self.initial_alpha = random.randint(180, 240)
+        self.alpha = self.initial_alpha
+
+        self.stroke_color = random.choice([
+            (255, 255, 100),   # warm yellow
+            (255, 200, 240),   # pink tint
+            (180, 220, 255),   # soft cyan
+        ])
+
+    def update(self):
+        self.perimeter_pos = (self.perimeter_pos + self.speed) % self.perimeter
+        self.lifetime -= 1
+        self.alpha = int(self.initial_alpha * (self.lifetime / 60))
+        return self.is_alive()
+
+    def is_alive(self):
+        return self.lifetime > 0
+
+    def draw(self, surface):
+        if self.alpha <= 0:
+            return
+
+        x, y = self.rect_x, self.rect_y
+        w, h = self.width, self.height
+        pos = self.perimeter_pos
+
+        # Determine position along the perimeter
+        if pos < w:  # Top edge
+            px, py = x + pos, y
+        elif pos < w + h:  # Right edge
+            px, py = x + w, y + (pos - w)
+        elif pos < w + h + w:  # Bottom edge
+            px, py = x + w - (pos - w - h), y + h
+        else:  # Left edge
+            px, py = x, y + h - (pos - 2 * w - h)
+
+        # Draw particle
+        surf = pygame.Surface((4, 4), pygame.SRCALPHA)
+        color = (self.stroke_color)
+        try:
+            pygame.draw.circle(surf, color, (2, 2), 2)
+        except ValueError:
+            print(f"[ERROR] Invalid color: {color}")
+            return
+
+        surface.blit(surf, (px - 2, py - 2))
 
 class ComboBand:
     def __init__(self, x, y, width, height, color, duration, current_points=0, max_points=5):
