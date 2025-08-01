@@ -2,6 +2,7 @@ import os
 import pygame
 import random
 
+
 class MusicManager:
     def __init__(self, music_folder):
         self.current_track = None
@@ -12,7 +13,7 @@ class MusicManager:
             for f in os.listdir(music_folder)
             if f.lower().endswith((".mp3", ".ogg", ".wav"))
         ]
-        self.current_index = random.randint(0, len(self.track_list))
+        self.current_index = random.randint(0, len(self.track_list)-1)
         pygame.mixer.music.set_endevent(pygame.USEREVENT + 1)  # Track end event
 
     def play_current(self):
@@ -47,3 +48,5 @@ class MusicManager:
         if self.track_list:
             return self.track_list[self.current_index]
         return "No Track"
+
+

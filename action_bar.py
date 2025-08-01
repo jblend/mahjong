@@ -30,7 +30,7 @@ class ActionBar:
         self.__draw_possible_matches()
         self.__draw_music_controls()
         self.__draw_volume_slider()
-        self.__draw_inventory_slots()
+        self.draw_inventory_slots()
         self.__draw_encounter_info()
 
     def __draw_score_and_wallet(self):
@@ -178,7 +178,7 @@ class ActionBar:
             vol_x, vol_y - vol_knob_radius, vol_width, vol_knob_radius * 2
         )
 
-    def __draw_inventory_slots(self):
+    def draw_inventory_slots(self):
         surface_w = self.surface.get_width()
         bar_y = self.surface.get_height() - 100
         padding = 20

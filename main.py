@@ -1,3 +1,4 @@
+import datetime
 import sys
 import os
 import random
@@ -11,6 +12,7 @@ from logging.handlers import RotatingFileHandler
 from shop import Shop
 from encounterengine import EncounterEngine
 from action_bar import ActionBar
+from item_description import ItemDescriptionCard
 name = "Curiosima"
 def get_base_dir():
     if getattr(sys, 'frozen', False):
@@ -53,7 +55,7 @@ logger.info("Logging initialized")
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout
 )
-from PyQt5.QtCore import QPropertyAnimation, QEasingCurve, QPoint, QTimer
+from PyQt5.QtCore import QPropertyAnimation, QEasingCurve, QPoint, QTimer, QEvent
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5 import QtGui, QtCore
 from matplotlib import cm
@@ -72,6 +74,8 @@ PAIR_COUNT = 7
 STACK_HEIGHT = 4
 NUM_ROWS = 6
 ACTION_BAR_HEIGHT = 80
+WIDTH = 1000
+HEIGHT = 1000
 
 
 tile_particle_map = {
@@ -87,7 +91,8 @@ class MahjongGame(QWidget):
         super().__init__()
         try:
             self.setWindowTitle("Mahjong Pygame + Qt5")
-            self.setGeometry(100, 100, 1000, 800)
+            self.setMouseTracking(True)
+            self.setGeometry(100, 100, HEIGHT, WIDTH)
             self.ACTION_BAR_HEIGHT = 80
             self.debug = False
             self.base_score = 5
@@ -193,6 +198,7 @@ class MahjongGame(QWidget):
                 # Optional: set fallback or disable music
 
             self.dragging_volume_slider = False
+            self.setMouseTracking(True)
 
             pygame.display.set_mode((1, 1), pygame.HIDDEN)
             self.icon_images = {
@@ -215,6 +221,8 @@ class MahjongGame(QWidget):
             FacultyGlyphicRegular = os.path.join("assets", "fonts", "FacultyGlyphic-Regular.ttf")
             MerchantVF = os.path.join("assets", "fonts", "MerchantVF.ttf")
             vergilia = os.path.join("assets", "fonts", "vergilia.ttf")
+            self.font_title = pygame.font.Font(vergilia, 36)
+            self.font_body = pygame.font.Font(FacultyGlyphicRegular, 20)
             self.combo_font = pygame.font.Font(vergilia, 36)  # 36pt size
             self.gui_font = pygame.font.Font(FacultyGlyphicRegular, 20)  # 36pt size
             self.button_font_2 = pygame.font.Font(OldeEnglishRegular, 32)  # Smaller than combo_font
@@ -239,6 +247,7 @@ class MahjongGame(QWidget):
             self.action_bar = ActionBar(self)
 
             self.init_shop()
+            self.item_card = ItemDescriptionCard(self.font_title, self.font_body)
             self.init_ui()
 
             self.timer = QTimer()
@@ -308,11 +317,14 @@ class MahjongGame(QWidget):
 
         layout.addLayout(btns)
         self.canvas_label = QLabel()
-        # self.canvas_label.mousePressEvent = self.handle_click
+        self.canvas_label.setMouseTracking(True)
         self.canvas_label.mousePressEvent = self.mousePressEvent
+        self.canvas_label.mouseMoveEvent = self.mouseMoveEvent
         layout.addWidget(self.canvas_label)
 
         self.setLayout(layout)
+
+
 
     def load_tileset_images(self):
         self.tile_images.clear()
@@ -599,6 +611,8 @@ class MahjongGame(QWidget):
     def mousePressEvent(self, event):
         x = event.pos().x()
         y = event.pos().y()
+        self.last_mouse_pos = (x, y)
+
         # print("[DEBUG] Mouse click at:", (x, y))
         pygame.draw.circle(self.surface, (255, 0, 0), (x, y), 5)
 
@@ -629,11 +643,12 @@ class MahjongGame(QWidget):
                     self.update_volume_from_mouse(x)
                     handled = True
 
+
                 elif name.startswith("inventory_"):
                     index = int(name.split("_")[1])
                     print(f"[CLICK] Inventory slot {index} clicked")
                     self.selected_inventory_index = index
-                    # (optional) trigger item logic here
+                    self.trigger_inventory_item_effect(index)
                     handled = True
 
                 elif name == "shop_continue":
@@ -668,6 +683,70 @@ class MahjongGame(QWidget):
         self.handle_click(event)
 
 
+    def trigger_inventory_item_effect(self, index):
+        if index >= len(self.inventory):
+            print(f"[ERROR] Invalid inventory index: {index}")
+            return
+
+        item = self.inventory[index]
+        item_id = item.get("id", f"item_{index}")
+
+        # Initialize cooldown and usage tracking dicts if needed
+        if not hasattr(self, "inventory_cooldowns"):
+            self.inventory_cooldowns = {}  # match-based cooldowns
+        if not hasattr(self, "inventory_timers"):
+            self.inventory_timers = {}  # time-based cooldowns
+
+        now = time.time()
+
+        # --- Check cooldown match ---
+        match_cd = item.get("cooldown_match")
+        if match_cd is not None:
+            last_match_use = self.inventory_cooldowns.get(item_id, -9999)
+            if self.match_count - last_match_use < match_cd:
+                print(f"[COOLDOWN] {item['title']} still on match cooldown.")
+                return
+            self.inventory_cooldowns[item_id] = self.match_count
+
+        # --- Check cooldown time ---
+        time_cd = item.get("cooldown_time")
+        if time_cd is not None:
+            last_time_use = self.inventory_timers.get(item_id, -9999)
+            if now - last_time_use < time_cd:
+                print(f"[COOLDOWN] {item['title']} still on time cooldown.")
+                return
+            self.inventory_timers[item_id] = now
+
+        # --- Check charges ---
+        charges = item.get("charges")
+        if charges is not None:
+            if charges <= 0:
+                print(f"[USED UP] {item['title']} has no charges left.")
+                return
+            item["charges"] -= 1
+            print(f"[USE] {item['title']} used. Charges left: {item['charges']}")
+            if item["charges"] == 0:
+                print(f"[REMOVE] {item['title']} removed from inventory.")
+                self.inventory.pop(index)
+                return
+
+        # --- Trigger effect (your logic here) ---
+        print(f"[TRIGGER] {item['title']} activated.")
+
+        # Optional: show animation, apply effect, etc.
+        self.handle_inventory_effect(item, index)
+
+    def handle_inventory_effect(self, item, index):
+        effect_type = item.get("effect")
+        if effect_type == "shuffle":
+            self.shuffle_board()
+        elif effect_type == "reveal":
+            self.reveal_random_tiles()
+        elif effect_type == "boost_score":
+            self.score += item.get("value", 100)
+        else:
+            print(f"[EFFECT] No defined logic for effect: {effect_type}")
+
     def handle_mouse_up(self, event):
         self.dragging_volume = False
 
@@ -676,22 +755,7 @@ class MahjongGame(QWidget):
 
         self.dragging_volume_slider = False
 
-    def mouseMoveEvent(self, event):
-        x = event.pos().x()
-        y = event.pos().y()
 
-        # Track hover index
-        self.hovered_inventory_index = None
-        for i in range(5):
-            rect = self.button_rects.get(f"inventory_{i}")
-            if rect and rect.collidepoint(x, y):
-                self.hovered_inventory_index = i
-                break
-
-        if self.dragging_volume_slider:
-            self.update_volume_from_mouse(event.pos().x())
-
-        self.update()  # Redraw with updated hover state
 
     def handle_mouse_motion(self, event):
         if self.dragging_volume:
@@ -729,6 +793,7 @@ class MahjongGame(QWidget):
         # Exit shop
         self.in_shop = False
         self.selected_inventory_index = None
+        self.setMouseTracking(True)
 
         self.shop_message = ""
         self.shop_items = []
@@ -904,12 +969,50 @@ class MahjongGame(QWidget):
         return len(self.board)
 
     def tick(self):
-        # Scroll background first
         self.bg_scroll_x = (self.bg_scroll_x + self.bg_scroll_speed_x) % self.background_tile.get_width()
         self.bg_scroll_y = (self.bg_scroll_y + self.bg_scroll_speed_y) % self.background_tile.get_height()
+        self.update_hover_state()  # Must be here!
 
-        # Then redraw everything
         self.update_canvas()
+
+    def update_hover_state(self):
+        if not hasattr(self, 'last_mouse_pos'):
+            return
+
+        pos = self.last_mouse_pos
+        self.item_card.hide()
+        self.hovered_inventory_index = None
+
+        # Use a fixed display location for all item cards
+        anchor_rect = self.button_rects.get("inventory_0")
+        card_x = anchor_rect.x if anchor_rect else 0
+        card_y = anchor_rect.y - TILE_HEIGHT * 4 - 10 if anchor_rect else 0
+        card_y = max(0, card_y)
+
+        # === Check inventory items ===
+        for i in range(5):
+            rect = self.button_rects.get(f"inventory_{i}")
+            if rect and rect.collidepoint(pos):
+                item = self.inventory[i] if i < len(self.inventory) else None
+                self.hovered_inventory_index = i
+                if item:
+                    self.item_card.show(item, (card_x, card_y))
+                return
+
+        # === Check shop items ===
+        if self.in_shop and hasattr(self, "shop_button_rects"):
+            for rect, item in self.shop_button_rects:
+                if rect.collidepoint(pos):
+                    self.item_card.show(item, (card_x, card_y))
+                    return
+
+        self.hovered_inventory_index = None
+
+    def mouseMoveEvent(self, event):
+        print(f"[MOUSE MOVE] {datetime.datetime.now()}")
+        self.last_mouse_pos = (event.pos().x(), event.pos().y())
+        # self.update_hover_state()  # ✅ Trigger hover check immediately
+        # self.update()  # ✅ Repaint if hover card changes
 
     def update_canvas(self):
         ACTION_BAR_HEIGHT = 100
@@ -924,7 +1027,9 @@ class MahjongGame(QWidget):
         self.draw_combo_fuse()
         self.action_bar.draw()  # External call to encapsulated class
         self.draw_particles()
+        self.update_hover_state()
         self.draw_overlays()
+        self.item_card.draw(self.surface)
         self.blit_to_qt()
 
     def draw_top_static_tiles(self):
@@ -1020,6 +1125,8 @@ class MahjongGame(QWidget):
         self.surface.fill((0, 80, 80))
 
     def draw_background_tiles(self):
+        pygame.mixer.music.get_pos()
+
         tile_w, tile_h = self.background_tile.get_size()
         surface_w, surface_h = self.surface.get_size()
         start_x = -int(self.bg_scroll_x)
@@ -1042,6 +1149,9 @@ class MahjongGame(QWidget):
             self.draw_shop_overlay()
         if self.in_game_over:
             self.draw_game_over_overlay()
+        if self.item_card:
+            print("[DRAW] Calling item_card.draw()")
+            self.item_card.draw(self.surface)
 
     def blit_to_qt(self):
         raw_data = pygame.image.tostring(self.surface, "RGB")
@@ -1161,6 +1271,7 @@ class MahjongGame(QWidget):
                         self.selected_tiles.clear()
                         self.update_game_state()
                     break
+
 
     def update_game_state(self):
         moves = self.get_possible_match_count()
@@ -1295,14 +1406,11 @@ class MahjongGame(QWidget):
             title = self.gui_font.render("Welcome to the Shop", True, (255, 255, 255))
             self.surface.blit(title, (80, 60))
 
-            # Wallet
-            wallet = self.money_font.render(f"Wallet: {self.wallet} pts", True, (255, 255, 100))
-            self.surface.blit(wallet, (80, 100))
-
             # Draw shop items
             self.shop_button_rects = []
-            base_y = 150
+            base_y = 110
             for i, item in enumerate(self.shop_items):
+                is_placeholder = item.get("placeholder", False)
                 name = item.get("title", "???")
                 cost = item.get("cost", 999)
                 img_path = item.get("image", None)
@@ -1310,7 +1418,7 @@ class MahjongGame(QWidget):
                 y = base_y + i * (TILE_HEIGHT + 30)
                 item_rect = pygame.Rect(80, y, 400, TILE_HEIGHT + 10)
 
-                # Load and blit image
+                # Load and blit image (even for placeholders if image exists)
                 if img_path:
                     full_path = os.path.normpath(os.path.join(BASE_DIR, img_path))
                     if os.path.exists(full_path):
@@ -1320,11 +1428,14 @@ class MahjongGame(QWidget):
                     else:
                         print(f"[SHOP WARNING] Icon not found at: {full_path}")
 
-                # Draw name & price
-                name_text = self.item_font.render(name, True, (255, 255, 255))
-                cost_text = self.money_font.render(f"{cost} pts", True, (255, 255, 100))
+                # Set colors based on placeholder status
+                name_color = (180, 180, 180) if is_placeholder else (255, 255, 255)
+                name_text = self.item_font.render(name, True, name_color)
                 self.surface.blit(name_text, (100 + TILE_WIDTH, y + 5))
-                self.surface.blit(cost_text, (100 + TILE_WIDTH, y + TILE_HEIGHT // 2))
+
+                if not is_placeholder:
+                    cost_text = self.money_font.render(f"{cost} pts", True, (255, 255, 100))
+                    self.surface.blit(cost_text, (100 + TILE_WIDTH, y + TILE_HEIGHT // 2))
 
                 self.shop_button_rects.append((item_rect, item))
 
@@ -1336,7 +1447,7 @@ class MahjongGame(QWidget):
             shadow_color = (0, 0, 0)
 
             # Common Y position
-            button_y = 150 + len(self.shop_items) * (TILE_HEIGHT + 30) + 80
+            button_y = 80 + len(self.shop_items) * (TILE_HEIGHT + 30) + 80
             btn_height = 60
             btn_shadow_offset = 2
 
@@ -1380,35 +1491,13 @@ class MahjongGame(QWidget):
             self.surface.blit(continue_label, (continue_rect.centerx - continue_label.get_width() // 2,
                                                continue_rect.centery - continue_label.get_height() // 2))
 
-            # Inventory view
-            self.surface.blit(self.gui_font.render("Inventory:", True, (255, 255, 255)), (500, 150))
-            for i in range(5):
-                x = 500 + i * (TILE_WIDTH + 10)
-                y = 190
-                rect = pygame.Rect(x, y, TILE_WIDTH, TILE_HEIGHT)
-                pygame.draw.rect(self.surface, (15, 15, 15), rect)
-                pygame.draw.rect(self.surface, (0, 60, 0), rect, 2)
-                if i < len(self.inventory):
-                    inv_item = self.inventory[i]
-                    icon_path = inv_item.get("image", None)
-                    if icon_path:
-                        full_path = os.path.join(BASE_DIR, icon_path)
-                        if os.path.exists(full_path):
-                            icon = pygame.image.load(full_path).convert_alpha()
-                            icon = pygame.transform.scale(icon, (TILE_WIDTH, TILE_HEIGHT))
-                            self.surface.blit(icon, (x, y))
-                self.button_rects[f"inventory_{i}"] = rect
-
-            # Continue Button (bottom right)
-            cont_width, cont_height = 240, 40
-            cont_x = self.surface.get_width() - cont_width - 40
-            cont_y = self.surface.get_height() - cont_height - 30
+            self.action_bar.draw()
 
 
             # Message
             if self.shop_message:
                 msg = self.gui_font.render(self.shop_message, True, (255, 100, 100))
-                self.surface.blit(msg, (80, cont_y - 40))
+                # self.surface.blit(msg, (80, cont_y - 40))
 
         except Exception as e:
             import traceback
@@ -1416,15 +1505,27 @@ class MahjongGame(QWidget):
             traceback.print_exc()
 
     def attempt_purchase(self, item):
+        PLACEHOLDER_ITEM = {
+            "title": "Sold Out",
+            "cost": 0,
+            "image": "assets/sold_out.png",  # You can make a gray X or similar icon
+            "placeholder": True
+        }
+
         name = item.get("title", "???")
         cost = item.get("cost", 999)
-
-        print(f"[PURCHASE] Wallet: {self.wallet}, Cost: {cost}")
 
         if self.wallet >= cost:
             if len(self.inventory) < 5:
                 self.wallet -= cost
                 self.inventory.append(item)
+
+                # ✅ Replace item with placeholder, preserving slot
+                for i, shop_item in enumerate(self.shop_items):
+                    if shop_item == item:
+                        self.shop_items[i] = PLACEHOLDER_ITEM.copy()
+                        break
+
                 self.shop_message = f"Purchased {name}!"
             else:
                 self.shop_message = "Inventory Full!"
@@ -1929,6 +2030,36 @@ class MahjongGame(QWidget):
             key = (tile["grid_x"], tile["grid_y"], tile["z"])
             self.tile_positions[key] = tile
 
+    import random
+
+    def shuffle_board(self):
+        if not self.board:
+            print("[SHUFFLE] No tiles to shuffle.")
+            return
+
+        print("[SHUFFLE] Shuffling board...")
+
+        # Extract all movable tile names
+        tile_names = [tile["name"] for tile in self.board]
+
+        # Shuffle the tile names
+        random.shuffle(tile_names)
+
+        # Reassign names to tiles
+        for tile, new_name in zip(self.board, tile_names):
+            tile["name"] = new_name
+
+        # Optional: reset selected tiles
+        self.selected_tiles.clear()
+
+        # Optional: feedback
+        # self.play_sound("shuffle")  # Stub, define if you want audio
+        # self.show_temp_popup("Tiles shuffled!", duration=1000)
+
+        # Optional: mark all as unexposed and recalculate visibility
+        for tile in self.board:
+            tile.pop("will_become_exposed", None)
+        # self.recalculate_exposures()
 
 
 if __name__ == "__main__":

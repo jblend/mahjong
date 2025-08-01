@@ -13,7 +13,10 @@
     "image": "assets/items/jerseydevil.png",
     "rarity": "common",
     "cost": 200,
-    "description": "Randomly rearranges the board."
+    "charges": 3,
+    "cooldown_match": 5,
+    "description": "Randomly rearranges the board.",
+    "effect": "shuffle"
   },
   {
     "unique_id": "mothman",
