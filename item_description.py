@@ -29,11 +29,11 @@ class ItemDescriptionCard:
         self.item_data = None
 
     def draw(self, surface):
-        print(f"[CARD] Visible: {self.visible}, Item Data: {self.item_data}")
+        # print(f"[CARD] Visible: {self.visible}, Item Data: {self.item_data}")
         if not self.visible or not self.item_data:
             return
 
-        print(f"[DRAW] Showing card for {self.item_data['title']} at {self.position}")
+        # print(f"[DRAW] Showing card for {self.item_data['title']} at {self.position}")
 
         x, y = self.position
         width = 300

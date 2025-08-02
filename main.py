@@ -70,7 +70,7 @@ TILES_ROOT = "./assets/tiles/classic"
 BG_ROOT = "./assets/bg"
 ITEMS = "./assets/items/shop_items.json"
 TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH = 64, 96, 6
-PAIR_COUNT = 7
+PAIR_COUNT = 6
 STACK_HEIGHT = 4
 NUM_ROWS = 6
 ACTION_BAR_HEIGHT = 80
@@ -96,6 +96,15 @@ class MahjongGame(QWidget):
             self.ACTION_BAR_HEIGHT = 80
             self.debug = False
             self.base_score = 5
+
+            self.show_booster_selector = False
+            self.booster_history = []
+            self.booster_choices = []  # List of 7 tiles
+            self.booster_selected_indices = set()  # Set of clicked indices (max 3)
+            self.show_booster_selector = False
+            self.selected_booster_tiles = []
+            self.booster_pack_cost = 75
+
             self.encounter_engine = EncounterEngine(self)
             self.in_shop = False
             self.in_game_over = False
@@ -105,6 +114,7 @@ class MahjongGame(QWidget):
             self.flash_interval = 500  # milliseconds
 
             self.board = []
+            self.booster_pool = []
             # self.shop = Shop(self)
             self.tile_positions = {}
             self.selected_tiles = []
@@ -146,6 +156,9 @@ class MahjongGame(QWidget):
             self.combo_fuse_y = 50
             self.combo_fuse_total_width = 200
             self.combo_fuse_height = 16
+
+            self.reroll_price = 50
+            self.reroll_base_price = 50  # Use this to reset later
 
 
             self.combo_timer = QTimer()
@@ -656,6 +669,36 @@ class MahjongGame(QWidget):
                     self.start_new_round()
                     handled = True
 
+                elif name == "shop_reroll":
+                    print("[CLICK] shop_reroll triggered")
+                    self.reroll_shop()
+                    handled = True
+
+
+                elif name == "booster_confirm":
+                    if len(self.booster_selected_indices) == 3:
+                        selected_names = [self.booster_choices[i] for i in self.booster_selected_indices]
+                        self.booster_history.extend(selected_names)
+                        self.exit_booster_selector()
+                        handled = True
+
+
+                elif name == "booster_skip":
+                    self.selected_booster_tiles = []  # Ensure nothing is added
+                    self.exit_booster_selector()
+                    handled = True
+
+                elif name == "shop_booster":
+                    print("[CLICK] shop_booster triggered")
+                    if self.wallet >= self.booster_pack_cost:
+                        self.wallet -= self.booster_pack_cost
+                        self.selected_booster_tiles = []
+                        self.booster_choices = random.sample(list(self.tile_images.keys()), 5)
+                        self.show_booster_selector = True
+                    else:
+                        self.shop_message = "Not enough points!"
+                    handled = True
+
                 break  # Found a matching button, stop checking
 
         if handled:
@@ -671,6 +714,53 @@ class MahjongGame(QWidget):
                     self.attempt_purchase(item)
                     return
 
+        elif self.show_booster_selector:
+            for i, (rect, item) in enumerate(self.booster_button_rects):
+                if rect.collidepoint(event.pos):
+                    if i in self.booster_selected_indices:
+                        self.booster_selected_indices.remove(i)
+                    elif len(self.booster_selected_indices) < 3:
+                        self.booster_selected_indices.add(i)
+                    self.update()
+                    return
+
+            if self.button_rects.get("booster_confirm", pygame.Rect(0, 0, 0, 0)).collidepoint(self.last_mouse_pos):
+                if len(self.booster_selected_indices) == 3:
+                    for idx in self.booster_selected_indices:
+                        self.tile_pool.append(self.booster_choices[idx])
+                    self.exit_booster_selector()
+
+            elif self.button_rects.get("booster_skip", pygame.Rect(0, 0, 0, 0)).collidepoint(self.last_mouse_pos):
+                self.exit_booster_selector()
+
+        # Check if booster UI is active
+        if self.booster_choices:
+            for i, (rect, tile_name) in enumerate(self.booster_button_rects):
+                if rect.collidepoint(self.last_mouse_pos):
+                    if i in self.booster_selected_indices:
+                        self.booster_selected_indices.remove(i)  # Unselect
+                    elif len(self.booster_selected_indices) < 3:
+                        self.booster_selected_indices.add(i) # Select
+                    return  # Stop here if clicked a tile
+
+            # Confirm button
+            confirm_rect = self.button_rects.get("booster_confirm")
+            if confirm_rect and confirm_rect.collidepoint(self.last_mouse_pos):
+                if len(self.booster_selected_indices) == 3:
+                    selected_names = [self.booster_choices[i] for i in self.booster_selected_indices]
+                    self.booster_pool.extend(selected_names * 2)  # Add pairs to pool
+                    self.booster_choices = []  # Close UI
+                    self.booster_selected_indices.clear()
+                return
+
+            # Skip button
+            skip_rect = self.button_rects.get("booster_skip")
+            if skip_rect and skip_rect.collidepoint(self.last_mouse_pos):
+                self.booster_choices = []  # Close UI
+                self.booster_selected_indices.clear()
+                return
+
+
         if self.in_game_over:
             if self.game_over_button_rect.collidepoint(x, y):
                 print("[CLICK] Start New Game from Game Over screen")
@@ -682,6 +772,44 @@ class MahjongGame(QWidget):
         # Tile selection fallback
         self.handle_click(event)
 
+    def get_random_booster_tiles(self, count):
+        try:
+            with open(ITEMS, "r") as f:
+                all_tiles = json.load(f)
+            return random.sample(all_tiles, min(count, len(all_tiles)))
+        except Exception as e:
+            print("[BOOSTER ERROR] Failed to load booster tiles")
+            traceback.print_exc()
+            return []
+
+    def reroll_shop(self):
+        print("[REROLL] Attempting shop reroll...")
+
+        if self.wallet < self.reroll_price:
+            self.shop_message = f"Not enough points to reroll! ({self.reroll_price} pts)"
+            print(f"[REROLL] Blocked. Wallet: {self.wallet}, Cost: {self.reroll_price}")
+            return
+
+        self.wallet -= self.reroll_price
+        self.reroll_price += 25  # Increase cost with each reroll
+        print(f"[REROLL] Deducted {self.reroll_price - 25}, new wallet: {self.wallet}, next cost: {self.reroll_price}")
+
+        # Remove placeholder items
+        self.shop_items = [item for item in self.shop_items if not item.get("placeholder")]
+
+        # Track inventory titles to avoid duplicates
+        owned_titles = {item.get("title") for item in self.inventory}
+
+        while len(self.shop_items) < 4:
+            new_item = self.get_random_shop_item(owned_titles)
+            if new_item:
+                self.shop_items.append(new_item)
+                owned_titles.add(new_item.get("title"))
+            else:
+                break  # Stop if no more valid items
+
+        self.shop_message = "Shop rerolled!"
+        self.update()
 
     def trigger_inventory_item_effect(self, index):
         if index >= len(self.inventory):
@@ -883,42 +1011,61 @@ class MahjongGame(QWidget):
         self.update()
 
     def new_game(self):
+        # 🧹 Clear all current game state
         self.board.clear()
         self.tile_positions.clear()
         self.selected_tiles.clear()
         self.matched_pairs.clear()
         self.match_count = 0
 
+        # 🧩 Base tiles: always include every tile from tile_images with PAIR_COUNT copies
         tile_names = list(self.tile_images.keys())
         if not tile_names:
             print("No tiles loaded.")
             return
 
-        chosen = random.sample(tile_names, min(len(tile_names), 144 // PAIR_COUNT))
         name_pool = []
-        for name in chosen:
-            name_pool.extend([name] * PAIR_COUNT)
+        for tile_name in tile_names:
+            name_pool.extend([tile_name] * PAIR_COUNT)
 
+        print(f"[DEBUG] Base pool: {len(name_pool)} tiles ({len(name_pool) // 2} pairs)")
+
+
+        # 🎯 Add 2 copies per tile selected in booster history
+        for tile_name in self.booster_history:
+            name_pool.extend([tile_name] * PAIR_COUNT)
+
+        total_tiles = len(name_pool)
+        print(f"[DEBUG] Total tiles in pool after boosters: {total_tiles} ({total_tiles // 2} pairs)")
+        print(f"[DEBUG] Booster history: {self.booster_history}")
+
+        # 🔀 Shuffle tile pool
         random.shuffle(name_pool)
+
+        # 🧱 Build layout to fit the tile count
         layout = []
         center_x = 6
         center_y = NUM_ROWS // 2
-
-        for z in range(STACK_HEIGHT):
-            width = 12 - z * 2
-            height = NUM_ROWS - z
+        needed_spots = total_tiles
+        layer = 0
+        while len(layout) < needed_spots:
+            width = 12 - layer * 2
+            height = NUM_ROWS - layer
             x_start = center_x - width // 2
             y_start = center_y - height // 2
             for y in range(height):
                 for x in range(width):
-                    layout.append((x_start + x, y_start + y, z))
+                    layout.append((x_start + x, y_start + y, layer))
+                    if len(layout) >= needed_spots:
+                        break
+                if len(layout) >= needed_spots:
+                    break
+            layer += 1
 
+        # 🎨 Generate tile objects
         margin_x = 80
         margin_y = 60
-
         for i, (gx, gy, gz) in enumerate(layout):
-            if i >= len(name_pool):
-                break
             abs_x = margin_x + gx * TILE_WIDTH
             abs_y = margin_y + gy * TILE_HEIGHT - gz * 10
             name = name_pool[i]
@@ -933,7 +1080,7 @@ class MahjongGame(QWidget):
             self.board.append(tile)
             self.tile_positions[(gx, gy, gz)] = tile
 
-        # 🛠️ Add this block to compute bounds for encounter effects
+        # 📐 Grid bounds for centering/fog
         grid_xs = [tile["grid_x"] for tile in self.board]
         grid_ys = [tile["grid_y"] for tile in self.board]
         self.min_grid_x = min(grid_xs)
@@ -942,7 +1089,6 @@ class MahjongGame(QWidget):
         self.max_grid_y = max(grid_ys)
         self.center_x = (self.min_grid_x + self.max_grid_x) // 2
         self.center_y = (self.min_grid_y + self.max_grid_y) // 2
-
 
     def is_tile_selectable(self, tile):
         gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
@@ -1009,7 +1155,7 @@ class MahjongGame(QWidget):
         self.hovered_inventory_index = None
 
     def mouseMoveEvent(self, event):
-        print(f"[MOUSE MOVE] {datetime.datetime.now()}")
+        # print(f"[MOUSE MOVE] {datetime.datetime.now()}")
         self.last_mouse_pos = (event.pos().x(), event.pos().y())
         # self.update_hover_state()  # ✅ Trigger hover check immediately
         # self.update()  # ✅ Repaint if hover card changes
@@ -1150,8 +1296,11 @@ class MahjongGame(QWidget):
         if self.in_game_over:
             self.draw_game_over_overlay()
         if self.item_card:
-            print("[DRAW] Calling item_card.draw()")
+            # print("[DRAW] Calling item_card.draw()")
             self.item_card.draw(self.surface)
+        if self.show_booster_selector:
+            self.draw_booster_selector()
+            return  # Prevent drawing the rest of the shop UI behind it
 
     def blit_to_qt(self):
         raw_data = pygame.image.tostring(self.surface, "RGB")
@@ -1205,6 +1354,7 @@ class MahjongGame(QWidget):
     def handle_click(self, event):
         x = event.pos().x()
         y = event.pos().y()
+
 
         # Convert Qt click to Pygame click
         for tile in reversed(sorted(self.get_topmost_tiles().values(), key=lambda t: t["z"])):
@@ -1353,10 +1503,31 @@ class MahjongGame(QWidget):
         self.surface.blit(shadow_text, (text_x + 2, text_y + 2))
         self.surface.blit(btn_text, (text_x, text_y))
 
+    def get_random_shop_item(self, exclude_titles=None):
+        if exclude_titles is None:
+            exclude_titles = set()
+
+        try:
+            with open(ITEMS, "r") as f:
+                all_items = json.load(f)
+
+            pool = [item for item in all_items if
+                    item.get("title") not in exclude_titles and not item.get("placeholder")]
+            if pool:
+                return random.choice(pool)
+            else:
+                print("[SHOP WARNING] No valid items to choose from.")
+                return None
+        except Exception as e:
+            print("[SHOP ERROR] Failed to get random shop item.")
+            traceback.print_exc()
+            return None
+
     def enter_shop_screen(self):
         print("[SHOP] Entering shop screen...")
 
         self.in_shop = True
+        self.reroll_price = self.reroll_base_price  # ✅ Reset reroll cost
 
         # Transfer leftover points
         leftover = self.score - self.target_score
@@ -1368,30 +1539,30 @@ class MahjongGame(QWidget):
         self.shop_selected_item_index = None
         self.shop_message = ""
 
-        # Load shop item pool
+        # Load shop item pool only once
         print(f"[SHOP] Attempting to load shop items from: {ITEMS}")
         try:
             with open(ITEMS, "r") as f:
-                all_items = json.load(f)
-                print(f"[SHOP] Loaded {len(all_items)} items from JSON.")
+                self.all_shop_items = json.load(f)
+                print(f"[SHOP] Loaded {len(self.all_shop_items)} items from JSON.")
 
                 # Sanity check first few items
-                for idx, item in enumerate(all_items[:3]):
+                for idx, item in enumerate(self.all_shop_items[:3]):
                     print(f"[SHOP] Item {idx}: {item}")
-
-                k = min(4, len(all_items))
-                if k > 0:
-                    self.shop_items = random.sample(all_items, k=k)
-                    print(f"[SHOP] Selected {k} random shop items.")
-                else:
-                    print("[SHOP WARNING] No items found in JSON.")
-                    self.shop_items = []
 
         except Exception as e:
             print("[SHOP ERROR] Failed to load shop items.")
             traceback.print_exc()
-            print(f"[SHOP ERROR] Exception: {e}")
-            self.shop_items = []
+            self.all_shop_items = []
+
+        # Populate shop
+        self.shop_items = []
+        while len(self.shop_items) < 4:
+            item = self.get_random_shop_item()
+            if item:
+                self.shop_items.append(item)
+            else:
+                break  # Fail-safe
 
         print("[SHOP] Shop screen setup complete. Calling update().")
         self.update()
@@ -1464,12 +1635,34 @@ class MahjongGame(QWidget):
             pygame.draw.rect(self.surface, btn_bg_color, reroll_rect)
             pygame.draw.rect(self.surface, btn_border_color, reroll_rect, 3)
 
-            reroll_label = btn_font.render("Reroll (-50)", True, reroll_text_color)
-            reroll_shadow = btn_font.render("Reroll (-50)", True, shadow_color)
+            reroll_label = btn_font.render(f"Reroll (-{self.reroll_price})", True, reroll_text_color)
+            reroll_shadow = btn_font.render(f"Reroll (-{self.reroll_price})", True, shadow_color)
             self.surface.blit(reroll_shadow, (reroll_rect.centerx - reroll_label.get_width() // 2 + btn_shadow_offset,
                                               reroll_rect.centery - reroll_label.get_height() // 2 + btn_shadow_offset))
             self.surface.blit(reroll_label, (reroll_rect.centerx - reroll_label.get_width() // 2,
                                              reroll_rect.centery - reroll_label.get_height() // 2))
+
+            # --- Booster Pack Button (Bottom Center) ---
+            booster_width = 340
+            booster_x = (self.surface.get_width() - booster_width) // 2
+            booster_y = button_y + btn_height + 40
+            booster_rect = pygame.Rect(booster_x, booster_y, booster_width, btn_height)
+            self.button_rects["shop_booster"] = booster_rect
+
+            hovering_booster = booster_rect.collidepoint(pygame.mouse.get_pos())
+            booster_color = (180, 140, 0) if hovering_booster else (160, 120, 0)
+
+            pygame.draw.rect(self.surface, btn_bg_color, booster_rect)
+            pygame.draw.rect(self.surface, booster_color, booster_rect, 3)
+
+            booster_label = btn_font.render(f"Buy Booster Pack (-{self.booster_pack_cost})", True, booster_color)
+            booster_shadow = btn_font.render(f"Buy Booster Pack (-{self.booster_pack_cost})", True, shadow_color)
+            self.surface.blit(booster_shadow,
+                              (booster_rect.centerx - booster_label.get_width() // 2 + btn_shadow_offset,
+                               booster_rect.centery - booster_label.get_height() // 2 + btn_shadow_offset))
+            self.surface.blit(booster_label,
+                              (booster_rect.centerx - booster_label.get_width() // 2,
+                               booster_rect.centery - booster_label.get_height() // 2))
 
             # --- Continue Button (Right) ---
             continue_width = 260
@@ -1511,6 +1704,11 @@ class MahjongGame(QWidget):
             "image": "assets/sold_out.png",  # You can make a gray X or similar icon
             "placeholder": True
         }
+
+        if item.get("placeholder"):
+            self.shop_message = "This slot is empty!"
+            print(f"[PURCHASE BLOCKED] Tried to buy placeholder: {item.get('title')}")
+            return
 
         name = item.get("title", "???")
         cost = item.get("cost", 999)
@@ -1556,6 +1754,8 @@ class MahjongGame(QWidget):
                 self.apply_fog_of_war()
             else:
                 print(f"[WARN] Unknown encounter mode: {self.encounter_mode}")
+
+            self.update_game_state()
         except Exception as e:
             print(f"[ERROR] Encounter effect '{self.encounter_mode}' failed: {e}")
 
@@ -1573,6 +1773,70 @@ class MahjongGame(QWidget):
         for tile in self.board:
             tile.pop("fogged", None)
         self.update_canvas()
+
+    def draw_booster_selector(self):
+        # Transparent overlay (no fill color, just alpha surface)
+        overlay = pygame.Surface(self.surface.get_size(), pygame.SRCALPHA)
+        self.surface.blit(overlay, (0, 0))
+
+        # Position offset for the whole booster UI
+        offset_x = 445
+        offset_y = 200
+
+        self.booster_button_rects = []
+
+        # Title
+        title = self.gui_font.render("Choose 3 Tiles", True, (255, 255, 255))
+        self.surface.blit(title, (offset_x, offset_y))
+
+        # Tile positioning
+        spacing = TILE_WIDTH + 20
+        start_x = 80 + offset_x
+        tile_y = offset_y + 60  # 60px below the title
+
+        for i, tile_name in enumerate(self.booster_choices):
+            x = start_x + i * spacing
+            rect = pygame.Rect(x, tile_y, TILE_WIDTH, TILE_HEIGHT)
+
+            # ✅ Load from self.tile_images
+            if tile_name in self.tile_images:
+                img = self.tile_images[tile_name]
+                scaled_img = pygame.transform.scale(img, (TILE_WIDTH, TILE_HEIGHT))
+                self.surface.blit(scaled_img, (x, tile_y))
+
+            # ✅ Draw green border if selected
+            if i in self.booster_selected_indices:
+                pygame.draw.rect(self.surface, (0, 255, 0), rect, 4)
+
+            # ✅ Save clickable rect and tile name
+            self.booster_button_rects.append((rect, tile_name))
+
+        # --- Confirm Button ---
+        confirm_enabled = len(self.booster_selected_indices) == 3
+        confirm_color = (0, 150, 0) if confirm_enabled else (60, 60, 60)
+        btn_y = tile_y + TILE_HEIGHT + 40
+
+        confirm_rect = pygame.Rect(80 + offset_x, btn_y, 180, 50)
+        self.button_rects["booster_confirm"] = confirm_rect
+
+        pygame.draw.rect(self.surface, confirm_color, confirm_rect)
+        label = self.button_font.render("Confirm", True, (255, 255, 255))
+        self.surface.blit(label, (confirm_rect.centerx - label.get_width() // 2,
+                                  confirm_rect.centery - label.get_height() // 2))
+
+        # --- Skip Button ---
+        skip_rect = pygame.Rect(300 + offset_x, btn_y, 180, 50)
+        self.button_rects["booster_skip"] = skip_rect
+
+        pygame.draw.rect(self.surface, (150, 0, 0), skip_rect)
+        skip_label = self.button_font.render("Skip", True, (255, 255, 255))
+        self.surface.blit(skip_label, (skip_rect.centerx - skip_label.get_width() // 2,
+                                       skip_rect.centery - skip_label.get_height() // 2))
+
+    def exit_booster_selector(self):
+        self.show_booster_selector = False
+        self.booster_choices = []
+        self.booster_selected_indices.clear()
 
     def apply_west_wind_shift(self):
         self.current_wind_direction = "west"
