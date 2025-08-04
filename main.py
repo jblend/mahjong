@@ -118,6 +118,13 @@ class MahjongGame(QWidget):
             self.last_flash_time = pygame.time.get_ticks()
             self.flash_interval = 500  # milliseconds
 
+            self.base_rarity_weights = {
+                "Common": 60,
+                "Uncommon": 30,
+                "Rare": 8,
+                "Epic": 2
+            }
+
             self.board = []
             self.current_column_order = None
             self.booster_pool = []
@@ -908,6 +915,8 @@ class MahjongGame(QWidget):
             self.hint_possible_matches()
         elif effect_type == "boost_score":
             self.score += item.get("value", 100)
+        elif effect_type == "swap_tarot_tiles_moon_sun":
+            self.swap_tarot_tiles_moon_sun()
         else:
             print(f"[EFFECT] No defined logic for effect: {effect_type}")
 
@@ -1601,6 +1610,11 @@ class MahjongGame(QWidget):
                             self.fading_matched_tiles = matched
                             self.match_sound.play()
 
+                            # Conditional Match
+                            self.combo_level += self.handle_lycan_match(self.selected_tiles[0]["name"],
+                                                                    lycanthrope_active = self.has_lycanthrope_item())
+
+
                             self.match_count += 1
                             self.modify_score(self.base_score)
 
@@ -1711,17 +1725,49 @@ class MahjongGame(QWidget):
             with open(ITEMS, "r") as f:
                 all_items = json.load(f)
 
-            pool = [item for item in all_items if
-                    item.get("title") not in exclude_titles and not item.get("placeholder")]
-            if pool:
-                return random.choice(pool)
-            else:
+            # Exclude duplicates
+            inventory_titles = {item["title"] for item in self.inventory}
+            current_shop_titles = {item["title"] for item in self.shop_items}
+            exclude_titles.update(inventory_titles)
+            exclude_titles.update(current_shop_titles)
+
+            valid_items = [item for item in all_items if
+                           item.get("title") not in exclude_titles and not item.get("placeholder")]
+
+            if not valid_items:
                 print("[SHOP WARNING] No valid items to choose from.")
                 return None
+
+            # Apply rarity weights
+            rarity_mods = self.get_rarity_modifiers()
+            weighted_pool = []
+            for item in valid_items:
+                rarity = item.get("rarity", "Common")
+                weight = rarity_mods.get(rarity, 1.0)
+                weighted_pool.extend([item] * int(weight * 10))  # Multiplier scale
+
+            if not weighted_pool:
+                print("[SHOP WARNING] No weighted items to choose from.")
+                return None
+
+            return random.choice(weighted_pool)
+
         except Exception as e:
             print("[SHOP ERROR] Failed to get random shop item.")
             traceback.print_exc()
             return None
+
+    def get_rarity_modifiers(self):
+        modifiers = {"Common": 1.0, "Uncommon": 1.0, "Rare": 1.0, "Epic": 1.0}
+        for item in self.inventory:
+            effect = item.get("effect")
+            if effect == "uncommon_chance":
+                modifiers["Uncommon"] += 0.5
+            elif effect == "rare_chance":
+                modifiers["Rare"] += 0.5
+            elif effect == "epic_chance":
+                modifiers["Epic"] += 0.5
+        return modifiers
 
     def enter_shop_screen(self):
         print("[SHOP] Entering shop screen...")
@@ -1757,12 +1803,14 @@ class MahjongGame(QWidget):
 
         # Populate shop
         self.shop_items = []
+        exclude_titles = {item["title"] for item in self.inventory}
         while len(self.shop_items) < 4:
-            item = self.get_random_shop_item()
+            item = self.get_random_shop_item(exclude_titles)
             if item:
                 self.shop_items.append(item)
+                exclude_titles.add(item["title"])  # Update to prevent repeats
             else:
-                break  # Fail-safe
+                break
 
         print("[SHOP] Shop screen setup complete. Calling update().")
         self.update()
@@ -2495,6 +2543,27 @@ class MahjongGame(QWidget):
             key = (tile["grid_x"], tile["grid_y"], tile["z"])
             self.tile_positions[key] = tile
 
+    def get_modified_rarity_weights(self):
+        weights = self.base_rarity_weights.copy()
+
+        for item in self.player_inventory:  # Assume this is a list of item dicts
+            effect = item.get("effect")
+
+            if effect == "uncommon_chance":
+                weights["Uncommon"] += 15
+                weights["Common"] -= 10
+            elif effect == "rare_chance":
+                weights["Rare"] += 10
+                weights["Uncommon"] -= 5
+            elif effect == "epic_chance":
+                weights["Epic"] += 5
+                weights["Rare"] -= 3
+
+        # Clamp negative values and normalize (optional)
+        for rarity in weights:
+            weights[rarity] = max(0, weights[rarity])
+
+        return weights
 
     def shuffle_board(self):
         if not self.board:
@@ -2550,6 +2619,40 @@ class MahjongGame(QWidget):
                 self.particles.append(SelectedParticle_B(tile["x"], tile["y"], TILE_WIDTH, TILE_HEIGHT))
 
         self.update()
+
+    def swap_tarot_tiles_moon_sun(self):
+        board = self.board.copy()
+        sun_tiles = [tile for tile in board if tile.tarot == 'thesun']
+        moon_tiles = [tile for tile in board if tile.tarot == 'themoon']
+
+        count = min(len(sun_tiles), len(moon_tiles))
+        for i in range(count):
+            sun = sun_tiles[i]
+            moon = moon_tiles[i]
+
+            # Swap positions
+            sun.grid_x, moon.grid_x = moon.grid_x, sun.grid_x
+            sun.grid_y, moon.grid_y = moon.grid_y, sun.grid_y
+            sun.z, moon.z = moon.z, sun.z
+
+            # Optional: swap screen positions (if calculated already)
+            sun.x, moon.x = moon.x, sun.x
+            sun.y, moon.y = moon.y, sun.y
+
+        return board
+
+    def handle_lycan_match(self, tile, lycanthrope_active: bool) -> int:
+        increase = 0
+        if lycanthrope_active and tile == "themoon" and self.combo_level < self.combo_max_level:
+            increase = 1
+        return increase
+
+    def has_lycanthrope_item(self) -> bool:
+        for item in self.inventory:
+            if item.get("unique_id") == "lycanthrope":
+                return True
+        return False
+
 
 
 if __name__ == "__main__":

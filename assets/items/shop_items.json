@@ -28,11 +28,44 @@
     "effect": "reveal"
   },
   {
-    "unique_id": "freeze_time",
-    "title": "Freeze Time",
-    "image": "assets/items/mothman.png",
+    "unique_id": "oggo_poggo",
+    "title": "Oggo Poggo",
+    "image": "assets/items/oggo_poggo.png",
+    "rarity": "uncommon",
+    "cost": 400,
+    "description": "Rare Items Appear More Often In the Shop",
+    "effect": "rare_chance"
+  },
+  {
+    "unique_id": "nessie",
+    "title": "Nessie",
+    "image": "assets/items/nessie.png",
+    "rarity": "common",
+    "cost": 400,
+    "description": "Uncommon Items Appear More Often In the Shop",
+    "effect": "uncommon_chance"
+  },
+  {
+    "unique_id": "bigfoot",
+    "title": "Bigfoot",
+    "image": "assets/items/bigfoot.png",
     "rarity": "rare",
     "cost": 400,
-    "description": "Stops the timer for 15 seconds."
+    "description": "Epic Items Appear More Often In the Shop",
+    "effect": "epic_chance"
+  },
+  {
+    "unique_id": "lycanthrope",
+    "title": "Lycanthrope",
+    "image": "assets/items/lycanthrope.png",
+    "rarity": "rare",
+    "cooldown_matches": 15,
+    "cost": 400,
+    "description": "Switch positions of all Sun and Moon tarot tiles.\nMatching a Moon tiles increases Combo Level by 1.",
+    "effect": "swap_tarot_tiles_moon_sun",
+    "on_activate": "swap_tarot_tiles_moon_sun",
+    "on_tile_match": {
+        "condition": "tile.tarot == 'themoon'",
+        "effect": "combo_level += 1"}
   }
 ]

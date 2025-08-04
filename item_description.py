@@ -102,7 +102,7 @@ class ItemDescriptionCard:
         line_y += line_height * (1 + spacing)
 
         for line in lines:
-            line_surface = self.font_body.render(line, True, (HEIGHT, WIDTH, 200))
+            line_surface = self.font_body.render(line, True, (220, 220, 220))
             surface.blit(line_surface, (x + padding, line_y))
             line_y += line_height
 
