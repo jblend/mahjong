@@ -1,5 +1,7 @@
 import pygame
 import os
+WIDTH = 1000
+HEIGHT = 1000
 
 RARITY_COLORS = {
     "common": (180, 180, 180),
@@ -19,7 +21,7 @@ class ItemDescriptionCard:
         self.position = (0, 0)
 
     def show(self, item, position):
-        print(f"[SHOW] Showing item card for: {item}")
+        # print(f"[SHOW] Showing item card for: {item}")
         self.item_data = item
         self.position = position
         self.visible = True
@@ -100,7 +102,7 @@ class ItemDescriptionCard:
         line_y += line_height * (1 + spacing)
 
         for line in lines:
-            line_surface = self.font_body.render(line, True, (200, 200, 200))
+            line_surface = self.font_body.render(line, True, (HEIGHT, WIDTH, 200))
             surface.blit(line_surface, (x + padding, line_y))
             line_y += line_height
 

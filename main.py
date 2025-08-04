@@ -2,6 +2,9 @@ import datetime
 import sys
 import os
 import random
+from typing import List, Tuple
+import pandas as pd;
+import matplotlib.pyplot as plt
 import pygame
 import time
 import math
@@ -53,9 +56,9 @@ logger.info("Logging initialized")
 
 
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout
+    QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QHBoxLayout, QMenu, QAction
 )
-from PyQt5.QtCore import QPropertyAnimation, QEasingCurve, QPoint, QTimer, QEvent
+from PyQt5.QtCore import QPropertyAnimation, QEasingCurve, QPoint, QTimer, QEvent, Qt
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5 import QtGui, QtCore
 from matplotlib import cm
@@ -70,8 +73,10 @@ TILES_ROOT = "./assets/tiles/classic"
 BG_ROOT = "./assets/bg"
 ITEMS = "./assets/items/shop_items.json"
 TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH = 64, 96, 6
-PAIR_COUNT = 6
-STACK_HEIGHT = 4
+MAX_ROWS = 6
+MAX_COLS = 18
+PAIR_COUNT = 32
+STACK_HEIGHT = 6
 NUM_ROWS = 6
 ACTION_BAR_HEIGHT = 80
 WIDTH = 1000
@@ -114,6 +119,7 @@ class MahjongGame(QWidget):
             self.flash_interval = 500  # milliseconds
 
             self.board = []
+            self.current_column_order = None
             self.booster_pool = []
             # self.shop = Shop(self)
             self.tile_positions = {}
@@ -328,6 +334,34 @@ class MahjongGame(QWidget):
         trigger_encounter.clicked.connect(self.trigger_encounter_effect)
         btns.addWidget(trigger_encounter)
 
+        # Create a QMenu for the right-click context
+        encounter_menu = QMenu(trigger_encounter)
+
+        # Dictionary of possible encounter modes
+        encounter_options = {
+            "West Wind": "west_wind",
+            "East Wind": "east_wind",
+            "North Wind": "north_wind",
+            "South Wind": "south_wind",
+            "Slot Machine": "slot_machine",
+            "Rotate CW": "rotate_cw",
+            "Rotate CCW": "rotate_ccw",
+            "Parallax": "parallax",
+            "Crush": "crush",
+            "None": None
+        }
+
+        # Populate the menu
+        for label, value in encounter_options.items():
+            action = encounter_menu.addAction(label)
+            action.triggered.connect(lambda checked, v=value: self.set_encounter_mode(v))
+
+        # Override contextMenuEvent
+        trigger_encounter.setContextMenuPolicy(Qt.CustomContextMenu)
+        trigger_encounter.customContextMenuRequested.connect(
+            lambda pos: encounter_menu.exec_(trigger_encounter.mapToGlobal(pos))
+        )
+
         layout.addLayout(btns)
         self.canvas_label = QLabel()
         self.canvas_label.setMouseTracking(True)
@@ -337,7 +371,9 @@ class MahjongGame(QWidget):
 
         self.setLayout(layout)
 
-
+    def set_encounter_mode(self, mode):
+        print(f"[DEBUG] Encounter mode set to: {mode}")
+        self.encounter_mode = mode
 
     def load_tileset_images(self):
         self.tile_images.clear()
@@ -552,7 +588,7 @@ class MahjongGame(QWidget):
             points = 1  # Start at 20% minimum when creating a new band
 
         color = self.get_combo_color(self.combo_level)
-        y = self.action_bar_top - 10
+        y = ACTION_BAR_HEIGHT
         x = 20
         width = self.surface.get_width() - 40
 
@@ -869,7 +905,7 @@ class MahjongGame(QWidget):
         if effect_type == "shuffle":
             self.shuffle_board()
         elif effect_type == "reveal":
-            self.reveal_random_tiles()
+            self.hint_possible_matches()
         elif effect_type == "boost_score":
             self.score += item.get("value", 100)
         else:
@@ -964,6 +1000,64 @@ class MahjongGame(QWidget):
         self.new_game()
         self.update()
 
+    def build_centered_pyramid_layout(self, total_tiles: int, max_cols=MAX_COLS, max_rows=MAX_ROWS) -> list[tuple[int, int, int]]:
+        layout = []
+        layer_maps = {}  # Tracks occupied positions per z level
+
+        # Determine max size for pyramid base
+        max_w, max_h = max_cols, max_rows
+        cx, cy = max_w // 2, max_h // 2
+
+        z = 0
+        step = 2
+        base_w, base_h = 2, 2
+
+        # Build in growth cycles: each z layer starts with minimal center, then grows
+        while len(layout) < total_tiles:
+            for dz in range(z + 1):
+                grow = z - dz
+                desired_w = min(base_w + (step * grow), max_w)
+                desired_h = min(base_h + (step * grow), max_h)
+
+                # Check if either dimension can still be expanded without exceeding max
+                if desired_w > max_w and desired_h > max_h:
+                    continue
+
+                occupied = layer_maps.setdefault(dz, set())
+
+                for y in range(desired_h):
+                    for x in range(desired_w):
+                        gx = cx - desired_w // 2 + x
+                        gy = cy - desired_h // 2 + y
+                        if (gx, gy) not in occupied:
+                            layout.append((gx, gy, dz))
+                            occupied.add((gx, gy))
+                        if len(layout) >= total_tiles:
+                            break
+                    if len(layout) >= total_tiles:
+                        break
+                if len(layout) >= total_tiles:
+                    break
+            z += 1
+
+        # Debug output
+        from collections import defaultdict
+        level_summary = defaultdict(list)
+        for gx, gy, gz in layout:
+            level_summary[gz].append((gx, gy))
+
+        for level in sorted(level_summary.keys()):
+            coords = level_summary[level]
+            min_x = min(gx for gx, _ in coords)
+            max_x = max(gx for gx, _ in coords)
+            min_y = min(gy for _, gy in coords)
+            max_y = max(gy for _, gy in coords)
+            w = max_x - min_x + 1
+            h = max_y - min_y + 1
+            print(f"[DEBUG] Z={level}: {w}x{h} => {len(coords)} tiles")
+
+        return layout
+
     def start_new_game(self):
         print("[ROUND] Starting next round...")
 
@@ -1011,14 +1105,13 @@ class MahjongGame(QWidget):
         self.update()
 
     def new_game(self):
-        # 🧹 Clear all current game state
         self.board.clear()
         self.tile_positions.clear()
         self.selected_tiles.clear()
         self.matched_pairs.clear()
         self.match_count = 0
 
-        # 🧩 Base tiles: always include every tile from tile_images with PAIR_COUNT copies
+        # 🤩 Always include every base tile with PAIR_COUNT
         tile_names = list(self.tile_images.keys())
         if not tile_names:
             print("No tiles loaded.")
@@ -1030,8 +1123,7 @@ class MahjongGame(QWidget):
 
         print(f"[DEBUG] Base pool: {len(name_pool)} tiles ({len(name_pool) // 2} pairs)")
 
-
-        # 🎯 Add 2 copies per tile selected in booster history
+        # 🎯 Add booster history (2 copies per tile)
         for tile_name in self.booster_history:
             name_pool.extend([tile_name] * PAIR_COUNT)
 
@@ -1039,35 +1131,40 @@ class MahjongGame(QWidget):
         print(f"[DEBUG] Total tiles in pool after boosters: {total_tiles} ({total_tiles // 2} pairs)")
         print(f"[DEBUG] Booster history: {self.booster_history}")
 
-        # 🔀 Shuffle tile pool
+        # 🔀 Shuffle the pool
         random.shuffle(name_pool)
 
-        # 🧱 Build layout to fit the tile count
-        layout = []
+        # 🧱 Build a centered pyramid layout starting from top layer
+        layout = self.build_centered_pyramid_layout(total_tiles)
+
         center_x = 6
         center_y = NUM_ROWS // 2
-        needed_spots = total_tiles
-        layer = 0
-        while len(layout) < needed_spots:
-            width = 12 - layer * 2
-            height = NUM_ROWS - layer
+
+        for z in range(STACK_HEIGHT):
+            width = 12 - z * 2
+            height = NUM_ROWS - z
             x_start = center_x - width // 2
             y_start = center_y - height // 2
             for y in range(height):
                 for x in range(width):
-                    layout.append((x_start + x, y_start + y, layer))
-                    if len(layout) >= needed_spots:
-                        break
-                if len(layout) >= needed_spots:
-                    break
-            layer += 1
+                    layout.append((x_start + x, y_start + y, z))
 
-        # 🎨 Generate tile objects
-        margin_x = 80
-        margin_y = 60
+        canvas_width, canvas_height = self.surface.get_size()
+        tile_w, tile_h = TILE_WIDTH, TILE_HEIGHT
+        tile_d = TILE_DEPTH
+        layout_xs = [x for x, y, z in layout]
+        layout_ys = [y for x, y, z in layout]
+        min_x, max_x = min(layout_xs), max(layout_xs)
+        min_y, max_y = min(layout_ys), max(layout_ys)
+        board_px_width = (max_x - min_x + 1) * tile_w
+        board_px_height = (max_y - min_y + 1) * tile_h
+        offset_x = (canvas_width - board_px_width) // 2 - min_x * tile_w
+        offset_y = (canvas_height - board_px_height) // 2 - min_y * tile_h - 40
+
         for i, (gx, gy, gz) in enumerate(layout):
-            abs_x = margin_x + gx * TILE_WIDTH
-            abs_y = margin_y + gy * TILE_HEIGHT - gz * 10
+            if i >= len(name_pool):
+                break
+            abs_x, abs_y = self.get_tile_pixel_position(gx, gy, gz, tile_w, tile_h, tile_d, offset_x, offset_y)
             name = name_pool[i]
             tile = {
                 "name": name,
@@ -1080,7 +1177,99 @@ class MahjongGame(QWidget):
             self.board.append(tile)
             self.tile_positions[(gx, gy, gz)] = tile
 
-        # 📐 Grid bounds for centering/fog
+        # Save for global reference
+        self.offset_x = offset_x
+        self.offset_y = offset_y
+
+        self.calculate_grid_bounds()
+
+    def calculate_grid_bounds(self):
+        if not self.board:
+            self.min_grid_x = self.max_grid_x = 0
+            self.min_grid_y = self.max_grid_y = 0
+            return
+
+        xs = [tile["grid_x"] for tile in self.board]
+        ys = [tile["grid_y"] for tile in self.board]
+
+        self.min_grid_x = min(xs)
+        self.max_grid_x = max(xs)
+        self.min_grid_y = min(ys)
+        self.max_grid_y = max(ys)
+
+    def get_tile_pixel_position(self, gx, gy, gz, tile_w, tile_h, tile_d, offset_x, offset_y):
+        return (
+            offset_x + gx * tile_w,
+            offset_y + gy * tile_h - gz * tile_d
+        )
+
+    def new_game_2(self):
+        # 🧹 Clear current game state
+        self.board.clear()
+        self.tile_positions.clear()
+        self.selected_tiles.clear()
+        self.matched_pairs.clear()
+        self.match_count = 0
+
+        # 🤩 Always include every base tile with PAIR_COUNT
+        tile_names = list(self.tile_images.keys())
+        if not tile_names:
+            print("No tiles loaded.")
+            return
+
+        name_pool = []
+        for tile_name in tile_names:
+            name_pool.extend([tile_name] * PAIR_COUNT)
+
+        print(f"[DEBUG] Base pool: {len(name_pool)} tiles ({len(name_pool) // 2} pairs)")
+
+        # 🎯 Add booster history (2 copies per tile)
+        for tile_name in self.booster_history:
+            name_pool.extend([tile_name] * PAIR_COUNT)
+
+        total_tiles = len(name_pool)
+        print(f"[DEBUG] Total tiles in pool after boosters: {total_tiles} ({total_tiles // 2} pairs)")
+        print(f"[DEBUG] Booster history: {self.booster_history}")
+
+        # 🔀 Shuffle the pool
+        random.shuffle(name_pool)
+
+        # 🧱 Build a centered pyramid layout starting from top layer
+        layout = self.build_centered_pyramid_layout(total_tiles)
+
+        # 🖼 Centering logic with offset
+        canvas_width, canvas_height = self.surface.get_size()
+        tile_w, tile_h = TILE_WIDTH, TILE_HEIGHT
+        layout_xs = [x for x, y, z in layout]
+        layout_ys = [y for x, y, z in layout]
+        min_x, max_x = min(layout_xs), max(layout_xs)
+        min_y, max_y = min(layout_ys), max(layout_ys)
+        board_px_width = (max_x - min_x + 1) * tile_w
+        board_px_height = (max_y - min_y + 1) * tile_h
+        offset_x = (canvas_width - board_px_width) // 2 - min_x * tile_w
+        offset_y = (canvas_height - board_px_height) // 2 - min_y * tile_h - 40  # shift up
+
+        self.board.clear()
+        self.tile_positions.clear()
+
+        # 🧱 Build tiles
+        for i, (gx, gy, gz) in enumerate(layout):
+            abs_x = offset_x + gx * tile_w
+            abs_y = offset_y + gy * tile_h - gz * 10  # stack offset
+
+            name = name_pool[i]
+            tile = {
+                "name": name,
+                "x": abs_x,
+                "y": abs_y,
+                "z": gz,
+                "grid_x": gx,
+                "grid_y": gy
+            }
+            self.board.append(tile)
+            self.tile_positions[(gx, gy, gz)] = tile
+
+        # 📐 Grid bounds for fog/center reference
         grid_xs = [tile["grid_x"] for tile in self.board]
         grid_ys = [tile["grid_y"] for tile in self.board]
         self.min_grid_x = min(grid_xs)
@@ -1250,19 +1439,30 @@ class MahjongGame(QWidget):
 
     def draw_tile_shadows(self):
         vacated = getattr(self, "_vacated_during_animation", set())
-        top_tiles = {
-            (tile["grid_x"], tile["grid_y"]): tile
-            for tile in self.board
-            if
-            tile not in self.animating_tiles and (tile["grid_x"], tile["grid_y"], tile["z"]) not in self.fading_coords
-        }
+        fading_coords = set((t["grid_x"], t["grid_y"], t["z"]) for t in self.fading_matched_tiles)
+        animating_coords = set((t["grid_x"], t["grid_y"], t["z"]) for t in self.animating_tiles)
 
+        # All current tiles that are not fading or animating
+        present_tiles = [
+            tile for tile in self.board
+            if (tile["grid_x"], tile["grid_y"], tile["z"]) not in fading_coords
+        ]
+
+        # Map (gx, gy) -> highest z of tile still present at that position
+        top_z_at = {}
+        for tile in present_tiles:
+            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
+            top_z_at[(gx, gy)] = max(top_z_at.get((gx, gy), -1), gz)
+
+        # Include animating tiles that are leaving a stack
+        for tile in self.animating_tiles:
+            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
+            top_z_at[(gx, gy)] = max(top_z_at.get((gx, gy), -1), gz - 1)
+
+        # Draw shadows under all tiles that are not the topmost at their (gx, gy)
         for tile in self.board:
-            gx, gy = tile["grid_x"], tile["grid_y"]
-            if (gx, gy) in vacated:
-                continue
-            top = top_tiles.get((gx, gy))
-            if top and top["z"] > tile["z"]:
+            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
+            if gz < top_z_at.get((gx, gy), -1):
                 shadow = pygame.Surface((TILE_WIDTH, TILE_HEIGHT), pygame.SRCALPHA)
                 shadow.fill((0, 0, 0, 200))
                 self.surface.blit(shadow, (tile["x"], tile["y"]))
@@ -1435,7 +1635,7 @@ class MahjongGame(QWidget):
                 self.trigger_game_over()
             else:
                 print("[STATE] No moves left but target score met → Entering Shop")
-                self.shop.enter_shop_screen()
+                self.enter_shop_screen()
 
     def trigger_game_over(self):
         print("[GAME OVER] Triggered")
@@ -1838,140 +2038,57 @@ class MahjongGame(QWidget):
         self.booster_choices = []
         self.booster_selected_indices.clear()
 
-    def apply_west_wind_shift(self):
-        self.current_wind_direction = "west"
-
-        print("🌬️ Applying Animated West Wind Shift")
+    def apply_wind_shift(self, dx: int, dy: int):
+        directions = {
+            (-1, 0): "west",
+            (1, 0): "east",
+            (0, -1): "north",
+            (0, 1): "south"
+        }
+        self.current_wind_direction = directions.get((dx, dy), "unknown")
+        print(f"🌬️ Applying Animated {self.current_wind_direction.capitalize()} Wind Shift")
 
         new_positions = {}
         animated_tiles = []
-
         occupied = set(self.tile_positions.keys())
         self.tile_positions.clear()
 
         for tile in sorted(self.board, key=lambda t: -t["z"]):
             gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
 
-            # Covered or bottom tile — skip movement
+            # Skip covered or bottom tiles
             if gz == 0 or (gx, gy, gz + 1) in occupied:
                 new_positions[(gx, gy, gz)] = tile
                 continue
 
-            new_gx = gx - 1
-            if new_gx < self.min_grid_x or (new_gx, gy, gz) in occupied:
+            new_gx = gx + dx
+            new_gy = gy + dy
+
+            if not (self.min_grid_x <= new_gx <= self.max_grid_x) or \
+                    not (self.min_grid_y <= new_gy <= self.max_grid_y):
                 new_positions[(gx, gy, gz)] = tile
                 continue
 
-            new_gz = 0
-            while (new_gx, gy, new_gz) in new_positions or (new_gx, gy, new_gz) in occupied:
-                new_gz += 1
+            if (new_gx, new_gy, gz) in occupied:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            # Descend to the highest unoccupied Z coordinate (lowest stack)
+            new_gz = gz
+            while new_gz > 0 and ((new_gx, new_gy, new_gz) in new_positions or (new_gx, new_gy, new_gz) in occupied):
+                new_gz -= 1
+
+            if (new_gx, new_gy, new_gz) in new_positions or (new_gx, new_gy, new_gz) in occupied:
+                new_positions[(gx, gy, gz)] = tile
+                continue
 
             tile["start_x"] = tile["x"]
             tile["start_y"] = tile["y"]
 
             tile["target_x"] = 80 + new_gx * TILE_WIDTH
-            tile["target_y"] = 60 + gy * TILE_HEIGHT - new_gz * TILE_DEPTH
-
-            tile["target_grid_x"] = new_gx
-            tile["target_grid_y"] = gy
-            tile["target_z"] = new_gz
-
-            tile["alpha"] = 255
-            tile["fading"] = True
-
-            animated_tiles.append(tile)
-
-        # Preserve position of non-moving tiles
-        for tile in self.board:
-            if tile not in animated_tiles:
-                key = (tile["grid_x"], tile["grid_y"], tile["z"])
-                new_positions[key] = tile
-
-        self.encounter_engine.animate_wind_shift(animated_tiles, new_positions, steps=12, interval=30)
-
-    def apply_east_wind_shift(self):
-        self.current_wind_direction = "east"
-
-        print("🌬️ Applying Animated East Wind Shift")
-
-        new_positions = {}
-        animated_tiles = []
-
-        occupied = set(self.tile_positions.keys())
-        self.tile_positions.clear()
-
-        for tile in sorted(self.board, key=lambda t: -t["z"]):
-            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
-
-            if gz == 0 or (gx, gy, gz + 1) in occupied:
-                new_positions[(gx, gy, gz)] = tile
-                continue
-
-            new_gx = gx + 1
-            if new_gx > self.max_grid_x or (new_gx, gy, gz) in occupied:
-                new_positions[(gx, gy, gz)] = tile
-                continue
-
-            new_gz = 0
-            while (new_gx, gy, new_gz) in new_positions or (new_gx, gy, new_gz) in occupied:
-                new_gz += 1
-
-            tile["start_x"] = tile["x"]
-            tile["start_y"] = tile["y"]
-
-            tile["target_x"] = 80 + new_gx * TILE_WIDTH
-            tile["target_y"] = 60 + gy * TILE_HEIGHT - new_gz * TILE_DEPTH
-
-            tile["target_grid_x"] = new_gx
-            tile["target_grid_y"] = gy
-            tile["target_z"] = new_gz
-
-            tile["alpha"] = 255
-            tile["fading"] = True
-
-            animated_tiles.append(tile)
-
-        # Preserve all tiles that didn't move
-        for tile in self.board:
-            if tile not in animated_tiles:
-                key = (tile["grid_x"], tile["grid_y"], tile["z"])
-                new_positions[key] = tile
-
-        self.encounter_engine.animate_wind_shift(animated_tiles, new_positions, steps=12, interval=30)
-
-    def apply_north_wind_shift(self):
-        self.current_wind_direction = "north"
-        print("🌬️ Applying Animated North Wind Shift")
-
-        new_positions = {}
-        animated_tiles = []
-
-        occupied = set(self.tile_positions.keys())
-        self.tile_positions.clear()
-
-        for tile in sorted(self.board, key=lambda t: -t["z"]):
-            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
-
-            if gz == 0 or (gx, gy, gz + 1) in occupied:
-                new_positions[(gx, gy, gz)] = tile
-                continue
-
-            new_gy = gy - 1
-            if new_gy < self.min_grid_y or (gx, new_gy, gz) in occupied:
-                new_positions[(gx, gy, gz)] = tile
-                continue
-
-            new_gz = 0
-            while (gx, new_gy, new_gz) in new_positions or (gx, new_gy, new_gz) in occupied:
-                new_gz += 1
-
-            tile["start_x"] = tile["x"]
-            tile["start_y"] = tile["y"]
-
-            tile["target_x"] = 80 + gx * TILE_WIDTH
             tile["target_y"] = 60 + new_gy * TILE_HEIGHT - new_gz * TILE_DEPTH
 
-            tile["target_grid_x"] = gx
+            tile["target_grid_x"] = new_gx
             tile["target_grid_y"] = new_gy
             tile["target_z"] = new_gz
 
@@ -1984,6 +2101,131 @@ class MahjongGame(QWidget):
             if tile not in animated_tiles:
                 key = (tile["grid_x"], tile["grid_y"], tile["z"])
                 new_positions[key] = tile
+
+        self.encounter_engine.animate_wind_shift(animated_tiles, new_positions, steps=12, interval=30)
+
+    def apply_west_wind_shift(self):
+        self.current_wind_direction = "west"
+        print("\U0001f32c️ Applying Animated West Wind Shift")
+
+        new_positions = {}
+        animated_tiles = []
+        occupied = set(self.tile_positions.keys())
+        self.tile_positions.clear()
+
+        for tile in sorted(self.board, key=lambda t: -t["z"]):
+            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
+
+            if gz == 0 or (gx - 1, gy, gz) in occupied:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            new_gx = gx - 1
+            if new_gx < self.min_grid_x:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            new_gz = gz
+            while new_gz > 0 and ((new_gx, gy, new_gz) in new_positions or (new_gx, gy, new_gz) in occupied):
+                new_gz -= 1
+
+            if (new_gx, gy, new_gz) in new_positions or (new_gx, gy, new_gz) in occupied:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            abs_x, abs_y = self.get_tile_pixel_position(new_gx, gy, new_gz, TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH, self.offset_x, self.offset_y)
+            tile.update({"start_x": tile["x"], "start_y": tile["y"], "target_x": abs_x, "target_y": abs_y,
+                         "target_grid_x": new_gx, "target_grid_y": gy, "target_z": new_gz,
+                         "alpha": 255, "fading": True})
+            animated_tiles.append(tile)
+
+        for tile in self.board:
+            if tile not in animated_tiles:
+                new_positions[(tile["grid_x"], tile["grid_y"], tile["z"])] = tile
+
+        self.encounter_engine.animate_wind_shift(animated_tiles, new_positions, steps=12, interval=30)
+
+
+    def apply_east_wind_shift(self):
+        self.current_wind_direction = "east"
+        print("\U0001f32c️ Applying Animated East Wind Shift")
+
+        new_positions = {}
+        animated_tiles = []
+        occupied = set(self.tile_positions.keys())
+        self.tile_positions.clear()
+
+        for tile in sorted(self.board, key=lambda t: -t["z"]):
+            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
+
+            if gz == 0 or (gx + 1, gy, gz) in occupied:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            new_gx = gx + 1
+            if new_gx > self.max_grid_x:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            new_gz = gz
+            while new_gz > 0 and ((new_gx, gy, new_gz) in new_positions or (new_gx, gy, new_gz) in occupied):
+                new_gz -= 1
+
+            if (new_gx, gy, new_gz) in new_positions or (new_gx, gy, new_gz) in occupied:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            abs_x, abs_y = self.get_tile_pixel_position(new_gx, gy, new_gz, TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH, self.offset_x, self.offset_y)
+            tile.update({"start_x": tile["x"], "start_y": tile["y"], "target_x": abs_x, "target_y": abs_y,
+                         "target_grid_x": new_gx, "target_grid_y": gy, "target_z": new_gz,
+                         "alpha": 255, "fading": True})
+            animated_tiles.append(tile)
+
+        for tile in self.board:
+            if tile not in animated_tiles:
+                new_positions[(tile["grid_x"], tile["grid_y"], tile["z"])] = tile
+
+        self.encounter_engine.animate_wind_shift(animated_tiles, new_positions, steps=12, interval=30)
+
+    def apply_north_wind_shift(self):
+        self.current_wind_direction = "north"
+        print("\U0001f32c️ Applying Animated North Wind Shift")
+
+        new_positions = {}
+        animated_tiles = []
+        occupied = set(self.tile_positions.keys())
+        self.tile_positions.clear()
+
+        for tile in sorted(self.board, key=lambda t: -t["z"]):
+            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
+
+            if gz == 0 or (gx, gy - 1, gz) in occupied:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            new_gy = gy - 1
+            if new_gy < self.min_grid_y:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            new_gz = gz
+            while new_gz > 0 and ((gx, new_gy, new_gz) in new_positions or (gx, new_gy, new_gz) in occupied):
+                new_gz -= 1
+
+            if (gx, new_gy, new_gz) in new_positions or (gx, new_gy, new_gz) in occupied:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            abs_x, abs_y = self.get_tile_pixel_position(gx, new_gy, new_gz, TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH,
+                                                        self.offset_x, self.offset_y)
+            tile.update({"start_x": tile["x"], "start_y": tile["y"], "target_x": abs_x, "target_y": abs_y,
+                         "target_grid_x": gx, "target_grid_y": new_gy, "target_z": new_gz,
+                         "alpha": 255, "fading": True})
+            animated_tiles.append(tile)
+
+        for tile in self.board:
+            if tile not in animated_tiles:
+                new_positions[(tile["grid_x"], tile["grid_y"], tile["z"])] = tile
 
         self.encounter_engine.animate_wind_shift(animated_tiles, new_positions, steps=12, interval=30)
 
@@ -2000,29 +2242,39 @@ class MahjongGame(QWidget):
         for tile in sorted(self.board, key=lambda t: -t["z"]):
             gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
 
-            if gz == 0 or (gx, gy, gz + 1) in occupied:
+            # Skip tiles that are on the ground level or already blocked in the direction of movement
+            if gz == 0 or (gx, gy + 1, gz) in occupied:
                 new_positions[(gx, gy, gz)] = tile
                 continue
 
             new_gy = gy + 1
-            if new_gy > self.max_grid_y or (gx, new_gy, gz) in occupied:
+
+            if new_gy > self.max_grid_y:
                 new_positions[(gx, gy, gz)] = tile
                 continue
 
-            new_gz = 0
-            while (gx, new_gy, new_gz) in new_positions or (gx, new_gy, new_gz) in occupied:
-                new_gz += 1
+            # Descend to the highest unoccupied Z coordinate at new location
+            new_gz = gz
+            while new_gz > 0 and ((gx, new_gy, new_gz) in new_positions or (gx, new_gy, new_gz) in occupied):
+                new_gz -= 1
+
+            if (gx, new_gy, new_gz) in new_positions or (gx, new_gy, new_gz) in occupied:
+                new_positions[(gx, gy, gz)] = tile
+                continue
+
+            abs_x, abs_y = self.get_tile_pixel_position(
+                gx, new_gy, new_gz,
+                TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH,
+                self.offset_x, self.offset_y
+            )
 
             tile["start_x"] = tile["x"]
             tile["start_y"] = tile["y"]
-
-            tile["target_x"] = 80 + gx * TILE_WIDTH
-            tile["target_y"] = 60 + new_gy * TILE_HEIGHT - new_gz * TILE_DEPTH
-
+            tile["target_x"] = abs_x
+            tile["target_y"] = abs_y
             tile["target_grid_x"] = gx
             tile["target_grid_y"] = new_gy
             tile["target_z"] = new_gz
-
             tile["alpha"] = 255
             tile["fading"] = True
 
@@ -2033,7 +2285,9 @@ class MahjongGame(QWidget):
                 key = (tile["grid_x"], tile["grid_y"], tile["z"])
                 new_positions[key] = tile
 
-        self.encounter_engine.animate_wind_shift(animated_tiles, new_positions, steps=12, interval=30)
+        self.encounter_engine.animate_wind_shift(
+            animated_tiles, new_positions, steps=12, interval=30
+        )
 
     def apply_slot_machine_shift(self):
         print("🎰 Applying Slot Machine Shift")
@@ -2090,128 +2344,75 @@ class MahjongGame(QWidget):
         if not self.board:
             return
 
-        min_x = min(tile["grid_x"] for tile in self.board)
-        max_x = max(tile["grid_x"] for tile in self.board)
-        center_x = (min_x + max_x) / 2
+        tile_w, tile_h, tile_d = TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH
+        offset_x, offset_y = self.offset_x, self.offset_y
 
+        # Group tiles by column
         columns = {}
         for tile in self.board:
             gx = tile["grid_x"]
             columns.setdefault(gx, []).append(tile)
 
-        used_columns = set()
-        animated_tiles = []
+        all_columns = sorted(columns.keys())
+        if not all_columns or len(all_columns) % 2 != 0:
+            print("[ERROR] Parallax requires an even number of columns.")
+            return
 
-        def find_nearest_unoccupied_column(target, direction):
-            offset = 1
-            while True:
-                candidate = target + direction * offset
-                if candidate in used_columns:
-                    offset += 1
-                    continue
-                if direction < 0 and candidate >= min_x:
-                    return candidate
-                elif direction > 0 and candidate <= max_x:
-                    return candidate
-                else:
-                    return target
+        if self.current_column_order is None:
+            self.current_column_order = all_columns.copy()
 
-        for gx in sorted(columns.keys()):
-            stack = columns[gx]
-            if gx < center_x:
-                target_gx = gx - 1
-                if target_gx < min_x or target_gx in used_columns:
-                    target_gx = find_nearest_unoccupied_column(int(center_x), 1)
-            elif gx > center_x:
-                target_gx = gx + 1
-                if target_gx > max_x or target_gx in used_columns:
-                    target_gx = find_nearest_unoccupied_column(int(center_x), -1)
+        col_order = self.current_column_order
+        col_count = len(col_order)
+        half = col_count // 2
+        left_cols = col_order[:half]
+        right_cols = col_order[half:]
+
+        new_order = [None] * col_count
+
+        # Handle left side
+        for i, col in enumerate(left_cols):
+            if i + 1 < half:
+                new_order[i + 1] = col  # Shift right
             else:
-                target_gx = gx
+                new_order[0] = col  # Wrap to leftmost
 
-            used_columns.add(target_gx)
+        # Handle right side
+        for i, col in enumerate(reversed(right_cols)):
+            index = col_count - 1 - i
+            if index - 1 >= half:
+                new_order[index - 1] = col  # Shift left
+            else:
+                new_order[-1] = col  # Wrap to rightmost
+
+        # Build shift map
+        shift_map = {old: new for old, new in zip(col_order, new_order)}
+        self.current_column_order = new_order
+
+        animated_tiles = []
+        used_targets = set()
+
+        for gx, stack in columns.items():
+            target_gx = shift_map.get(gx, gx)
+
+            # Prevent duplicate column assignments in animation
+            while target_gx in used_targets:
+                target_gx += 1 if target_gx > gx else -1
+            used_targets.add(target_gx)
 
             for tile in stack:
+                abs_x, abs_y = self.get_tile_pixel_position(
+                    target_gx, tile["grid_y"], tile["z"],
+                    tile_w, tile_h, tile_d, offset_x, offset_y
+                )
+
                 tile["start_x"] = tile["x"]
-                tile["target_x"] = 80 + target_gx * TILE_WIDTH
-                tile["grid_x"] = target_gx
-                tile["fading"] = (gx == min_x or gx == max_x)  # True if from edge column
-                tile["alpha"] = 255  # full opacity to start
+                tile["target_x"] = abs_x
+                tile["target_grid_x"] = target_gx
+                tile["fading"] = (gx in [col_order[0], col_order[-1]])  # edge fades
+                tile["alpha"] = 255
                 animated_tiles.append(tile)
 
         self.encounter_engine.animate_parallax_tiles(animated_tiles, steps=10, interval=30)
-
-    def rotate_local_blocks(self, clockwise=True):
-        if not self.board:
-            return
-
-        new_board = []
-        new_positions = {}
-        visited = set()
-
-        # Group tiles into 3x3 blocks by their top-left origin
-        blocks = {}
-        for tile in self.board:
-            gx, gy = tile["grid_x"], tile["grid_y"]
-            block_x = (gx // 3) * 3
-            block_y = (gy // 3) * 3
-            blocks.setdefault((block_x, block_y), []).append(tile)
-
-        for (bx, by), tiles in blocks.items():
-            # Build local 3x3 grid: tile_map[y][x] = tile
-            grid = [[None for _ in range(3)] for _ in range(3)]
-            for tile in tiles:
-                local_x = tile["grid_x"] - bx
-                local_y = tile["grid_y"] - by
-                if 0 <= local_x < 3 and 0 <= local_y < 3:
-                    grid[local_y][local_x] = tile
-
-            # Rotate grid
-            rotated = [[None for _ in range(3)] for _ in range(3)]
-            for y in range(3):
-                for x in range(3):
-                    tile = grid[y][x]
-                    if tile:
-                        if clockwise:
-                            new_x, new_y = 2 - y, x
-                        else:
-                            new_x, new_y = y, 2 - x
-
-                        # Update tile position
-                        tile["grid_x"] = bx + new_x
-                        tile["grid_y"] = by + new_y
-                        tile["x"] = 80 + tile["grid_x"] * TILE_WIDTH
-                        tile["y"] = 60 + tile["grid_y"] * TILE_HEIGHT - tile["z"] * TILE_DEPTH
-
-                        key = (tile["grid_x"], tile["grid_y"], tile["z"])
-                        new_positions[key] = tile
-                        new_board.append(tile)
-
-        self.board = new_board
-        self.tile_positions = new_positions
-        self.normalize_stacks()
-        self.update_canvas()  # Fixed
-
-    def normalize_stacks(self):
-        from collections import defaultdict
-        column_groups = defaultdict(list)
-
-        # Group tiles by (grid_x, grid_y)
-        for tile in self.board:
-            key = (tile["grid_x"], tile["grid_y"])
-            column_groups[key].append(tile)
-
-        # Repack each column's stack bottom-up
-        new_positions = {}
-        for (gx, gy), tiles in column_groups.items():
-            sorted_tiles = sorted(tiles, key=lambda t: t["z"])
-            for new_z, tile in enumerate(sorted_tiles):
-                tile["z"] = new_z
-                tile["x"] = 80 + gx * TILE_WIDTH
-                tile["y"] = 60 + gy * TILE_HEIGHT - new_z * TILE_DEPTH
-                new_positions[(gx, gy, new_z)] = tile
-
-        self.tile_positions = new_positions
 
     def apply_crush_shift(self):
         print("⚙️ Applying Crush Shift (animated 4-stack crush)")
@@ -2294,7 +2495,6 @@ class MahjongGame(QWidget):
             key = (tile["grid_x"], tile["grid_y"], tile["z"])
             self.tile_positions[key] = tile
 
-    import random
 
     def shuffle_board(self):
         if not self.board:
@@ -2324,6 +2524,32 @@ class MahjongGame(QWidget):
         for tile in self.board:
             tile.pop("will_become_exposed", None)
         # self.recalculate_exposures()
+
+    def hint_possible_matches(self):
+        if not self.board or not self.selected_tiles:
+            print("[HINT] No tile selected or board is empty.")
+            return
+
+        selected_tile = self.selected_tiles[0]
+        selected_name = selected_tile["name"]
+
+        # Find all tiles that match the selected name and are selectable
+        matching_tiles = [
+            tile for tile in self.board
+            if tile["name"] == selected_name and tile != selected_tile and self.is_tile_selectable(tile)
+        ]
+
+        if not matching_tiles:
+            print(f"[HINT] No matching tiles found for: {selected_name}")
+            return
+
+        print(f"[HINT] Showing possible matches for: {selected_name}")
+
+        for tile in matching_tiles:
+            for _ in range(30):
+                self.particles.append(SelectedParticle_B(tile["x"], tile["y"], TILE_WIDTH, TILE_HEIGHT))
+
+        self.update()
 
 
 if __name__ == "__main__":

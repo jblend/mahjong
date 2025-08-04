@@ -247,7 +247,7 @@ class SelectedParticle_B:
         self.perimeter_pos = random.uniform(0, self.perimeter)
         self.speed = random.uniform(2.0, 4.5)
 
-        self.lifetime = random.randint(50, 70)
+        self.lifetime = random.randint(100, 120)
         self.initial_alpha = random.randint(180, 240)
         self.alpha = self.initial_alpha
 

@@ -59,6 +59,9 @@ class EncounterEngine:
             if ctx.animation_step >= ctx.animation_steps:
                 for tile in ctx.animating_tiles:
                     tile["x"] = tile["target_x"]
+                    tile["y"] = tile.get("target_y", tile["y"])
+                    tile["grid_x"] = tile["target_grid_x"]  # ✅ properly update here
+                    tile["grid_y"] = tile.get("target_grid_y", tile["grid_y"])
                     tile["alpha"] = 255
                     tile.pop("fading", None)
 
@@ -71,6 +74,10 @@ class EncounterEngine:
                 sx = tile.get("start_x", tile["x"])
                 tx = tile.get("target_x", tile["x"])
                 tile["x"] = sx + (tx - sx) * progress
+
+                sy = tile.get("start_y", tile["y"])
+                ty = tile.get("target_y", tile.get("y", sy))
+                tile["y"] = sy + (ty - sy) * progress
 
                 if tile.get("fading"):
                     tile["alpha"] = int(80 + (255 - 80) * progress)
@@ -192,6 +199,9 @@ class EncounterEngine:
         new_positions = {}
         animating_tiles = []
 
+        tile_w, tile_h, tile_d = TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH
+        offset_x, offset_y = ctx.offset_x, ctx.offset_y
+
         blocks = {}
         for tile in ctx.board:
             gx, gy = tile["grid_x"], tile["grid_y"]
@@ -222,14 +232,18 @@ class EncounterEngine:
                     tx, ty = bx + nx, by + ny
 
                     for dz, tile in enumerate(stack):
+                        abs_x, abs_y = ctx.get_tile_pixel_position(
+                            tx, ty, tile["z"], tile_w, tile_h, tile_d, offset_x, offset_y
+                        )
+
                         tile.update({
                             "start_x": tile["x"],
                             "start_y": tile["y"],
                             "target_grid_x": tx,
                             "target_grid_y": ty,
                             "target_z": tile["z"],
-                            "target_x": 80 + tx * TILE_WIDTH,
-                            "target_y": 60 + ty * TILE_HEIGHT - tile["z"] * TILE_DEPTH
+                            "target_x": abs_x,
+                            "target_y": abs_y
                         })
                         animating_tiles.append(tile)
 
@@ -270,3 +284,4 @@ class EncounterEngine:
             QTimer.singleShot(interval, animate_step)
 
         animate_step()
+

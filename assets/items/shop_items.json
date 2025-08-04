@@ -24,7 +24,8 @@
     "image": "assets/items/mothman.png",
     "rarity": "uncommon",
     "cost": 150,
-    "description": "Highlights a valid matching pair."
+    "description": "Highlights a valid matching pair.",
+    "effect": "reveal"
   },
   {
     "unique_id": "freeze_time",
