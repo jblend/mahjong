@@ -67,5 +67,55 @@
     "on_tile_match": {
         "condition": "tile.tarot == 'themoon'",
         "effect": "combo_level += 1"}
+  },
+  {
+    "unique_id": "golem",
+    "title": "Golem",
+    "image": "assets/items/golem.png",
+    "rarity": "rare",
+    "type": "Passive",
+    "cost": 400,
+    "effects": {
+        "type": "start_of_round",
+        "reduction": 50,
+        "score_multiplier": 0.5
+    },
+    "description": "Reduces the target score each round by 200, but reduces leftover score added to wallet by 25%.\nWheel of Fortune tiles have a 1 in 12 chance of doubling your total score when matched.",
+    "on_tile_match": {
+        "condition": "tile.tarot == 'wheeloffortune'",
+        "effect": "score_multiplier *= 2"}
+},
+  {
+    "unique_id": "vampyre",
+    "title": "Vampyre",
+    "image": "assets/items/vampyre.png",
+    "rarity": "rare",
+    "cost": 400,
+    "description": "When active, drains 10% of the wallet per exposed Sun Tiles at the start of the round.\nAll scoring is multiplied by number of exposed Moon Tiles.\nIf the wallet amount is too small to drain, this card is consumed.",
+    "type": "start_of_round",
+    "consumes_if_insufficient_funds": true,
+    "effect": {
+    "type": "start_of_round",
+    "wallet_drain_percent": 40,
+    "score_multiplier": 2,
+    "consumes_if_insufficient_funds": true
+    }
+  },
+  {
+    "unique_id": "chupacabra",
+    "title": "Chupacabra",
+    "image": "assets/items/chupacabra.png",
+    "rarity": "uncommon",
+    "cost": 400,
+    "description": "When active, drains 20% of the wallet at the start of the round.\nAll scoring is doubled.\nIf the wallet amount is too small to drain, this card is consumed.",
+    "type": "start_of_round",
+    "consumes_if_insufficient_funds": true,
+    "effect": {
+    "type": "start_of_round",
+    "wallet_drain_percent": 20,
+    "score_multiplier": 2,
+    "consumes_if_insufficient_funds": true
+    }
   }
+
 ]

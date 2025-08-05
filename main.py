@@ -75,7 +75,7 @@ ITEMS = "./assets/items/shop_items.json"
 TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH = 64, 96, 6
 MAX_ROWS = 6
 MAX_COLS = 18
-PAIR_COUNT = 32
+PAIR_COUNT = 4
 STACK_HEIGHT = 6
 NUM_ROWS = 6
 ACTION_BAR_HEIGHT = 80
@@ -960,6 +960,49 @@ class MahjongGame(QWidget):
             total += count // 2  # Each pair is a match
         return total
 
+    def get_base_target_score(self):
+        return self.target_score
+
+    def check_for_inventory_passives(self):
+        base_target = self.get_base_target_score()
+        reduction = 1
+        for item in self.inventory:
+            if item['title'] == "Golem":
+                reduction = int(item['effects']['reduction'])
+            self.target_score = int(max(0, base_target/reduction))
+        else:
+            self.target_score = base_target
+
+    def get_count_exposed_tiles_of_name(self, tile_name):
+        name_tiles = [tile for tile in self.board if tile["name"] == tile_name]
+        exposed_name_tiles = [tile for tile in name_tiles if self.is_tile_selectable(tile)]
+        return len(exposed_name_tiles)
+
+    def start_of_round_inventory_check(self):
+        for item in self.inventory:
+            if item["title"] == "Vampyre":
+                drain_percent = self.get_count_exposed_tiles_of_name("thesun")
+                cost = int(self.wallet / drain_percent)
+                if self.wallet >= cost:
+                    print(f"before the blood sucker {self.wallet}")
+                    self.wallet = cost
+                    print(f"after the blood sucker {self.wallet}")
+                else:
+                    # Remove Vampyr from inventory
+                    self.inventory.remove(item)
+                    # self.display_message("Vampyr was consumed — insufficient funds.")
+            if item["title"] == "Chupacabra":
+                cost = int(self.wallet / item["effect"]["wallet_drain_percent"])
+                if self.wallet >= cost:
+                    print(f"before the blood sucker {self.wallet}")
+                    self.wallet = cost
+                    print(f"after the blood sucker {self.wallet}")
+                else:
+                    # Remove Chupacabra from inventory
+                    self.inventory.remove(item)
+                    # self.display_message("Chupacabra was consumed — insufficient funds.")
+
+
     def start_new_round(self):
         print("[ROUND] Starting next round...")
 
@@ -971,15 +1014,15 @@ class MahjongGame(QWidget):
         self.shop_message = ""
         self.shop_items = []
 
-        # Transfer leftover points
-        leftover = self.score - self.target_score
-        if leftover > 0:
-            self.wallet += leftover
+        self.start_of_round_inventory_check()
 
         # Reset score and round info
         self.score = 0
         self.round_number += 1
         self.target_score = self.calculate_target_score()
+
+        self.check_for_inventory_passives()
+
         self.match_count = 0
         self.combo_multiplier = 1
         self.fading_matched_tiles = []
@@ -1398,7 +1441,7 @@ class MahjongGame(QWidget):
             if img:
                 self.surface.blit(img, (tile["x"], tile["y"]))
                 if tile in self.selected_tiles:
-                    for _ in range(20):
+                    for _ in range(10):
                         self.particles.append(SelectedParticle(tile["x"], tile["y"], TILE_WIDTH, TILE_HEIGHT))
 
     def draw_exposed_tiles(self):
@@ -1564,8 +1607,7 @@ class MahjongGame(QWidget):
         x = event.pos().x()
         y = event.pos().y()
 
-
-        # Convert Qt click to Pygame click
+        # Convert Qt click to Pygame-style coordinates
         for tile in reversed(sorted(self.get_topmost_tiles().values(), key=lambda t: t["z"])):
             tx, ty = tile["x"], tile["y"]
             if tx <= x <= tx + TILE_WIDTH and ty <= y <= ty + TILE_HEIGHT:
@@ -1574,67 +1616,81 @@ class MahjongGame(QWidget):
                         self.selected_tiles.remove(tile)
                     else:
                         self.selected_tiles.append(tile)
+
                     if len(self.selected_tiles) == 2:
-                        if self.selected_tiles[0]["name"] == self.selected_tiles[1]["name"]:
-                            matched = list(self.selected_tiles)  # Copy for animation
-                            for t in matched:
-                                t["fade_start"] = pygame.time.get_ticks()
-                                t["fade_duration"] = 600  # ms
-                                t["fading_out"] = True
+                        t1, t2 = self.selected_tiles
+                        if t1["name"] == t2["name"]:
+                            self.handle_match(t1, t2)
+                        else:
+                            # Unselect t1, keep t2 as the only selected tile
+                            self.selected_tiles = [t2]
 
-                                # Lookup particle class based on tile name (fallback to SmokeParticle)
-                                particle_cls = tile_particle_map.get(t["name"], SparkleParticle)
+                    self.update_game_state()
+                break
 
-                                for _ in range(6):
-                                    px = t["x"] + random.randint(-5, 5)
-                                    py = t["y"] + random.randint(-5, 5)
-                                    self.particles.append(particle_cls(px, py))
+    def handle_match(self, tile1, tile2):
+        matched = [tile1, tile2]
 
-                            # New logic to mark tiles beneath as exposed
-                            for tile in matched:
-                                gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
-                                for other in self.board:
-                                    if (
-                                            other["grid_x"] == gx and
-                                            other["grid_y"] == gy and
-                                            other["z"] < gz and
-                                            not other.get("will_become_exposed")
-                                    ):
-                                        # Only mark if it's the topmost under this column (and not being removed)
-                                        if not any(t2 for t2 in matched if t2 is not tile and
-                                                                           t2["grid_x"] == gx and t2[
-                                                                               "grid_y"] == gy and t2["z"] > other[
-                                                                               "z"]):
-                                            other["will_become_exposed"] = True
+        # Trigger fade animation and particles
+        for t in matched:
+            t["fade_start"] = pygame.time.get_ticks()
+            t["fade_duration"] = 600
+            t["fading_out"] = True
 
-                            self.fading_matched_tiles = matched
-                            self.match_sound.play()
+            particle_cls = tile_particle_map.get(t["name"], SparkleParticle)
+            for _ in range(6):
+                px = t["x"] + random.randint(-5, 5)
+                py = t["y"] + random.randint(-5, 5)
+                self.particles.append(particle_cls(px, py))
 
-                            # Conditional Match
-                            self.combo_level += self.handle_lycan_match(self.selected_tiles[0]["name"],
-                                                                    lycanthrope_active = self.has_lycanthrope_item())
+        # Mark tiles beneath as exposed
+        for tile in matched:
+            gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
+            for other in self.board:
+                if (
+                        other["grid_x"] == gx and
+                        other["grid_y"] == gy and
+                        other["z"] < gz and
+                        not other.get("will_become_exposed")
+                ):
+                    # Ensure no other matched tile is above this one
+                    if not any(
+                            t2 for t2 in matched
+                            if t2 is not tile and t2["grid_x"] == gx and t2["grid_y"] == gy and t2["z"] > other["z"]
+                    ):
+                        other["will_become_exposed"] = True
 
+        self.fading_matched_tiles = matched
+        self.match_sound.play()
 
-                            self.match_count += 1
-                            self.modify_score(self.base_score)
+        # Lycanthrope conditional bonus
+        self.combo_level += self.handle_lycan_match(tile1["name"], lycanthrope_active=self.has_lycanthrope_item())
 
-                            # NEW: Add combo point when a match is made
-                            self.add_combo_point()
+        # Apply base score, including item-triggered modifiers
+        score_multiplier = self.handle_golem_match(tile1)
+        self.score *= score_multiplier
 
-                            self.combo_display_text = f"X  {self.combo_multiplier}"
-                            self.combo_display_time = QtCore.QTime.currentTime().msecsSinceStartOfDay()
-                            self.update()  # Triggers a repaint of the widget
+        scoring_mult = self.get_scoring_multipliers()
+        score = self.base_score * scoring_mult
+        self.modify_score(tile1['name'], score)
 
-                            if self.encounter_mode and self.match_count % 5 == 0:
-                                print(f"[Encounter Triggered] Mode: {self.encounter_mode}")
-                                self.trigger_encounter_effect()
-                                self.encounter_trigger_in = 5
-                            elif self.encounter_mode:
-                                self.encounter_trigger_in -= 1
+        # Combo logic
+        self.add_combo_point()
+        self.combo_display_text = f"X  {self.combo_multiplier}"
+        self.combo_display_time = QtCore.QTime.currentTime().msecsSinceStartOfDay()
 
-                        self.selected_tiles.clear()
-                        self.update_game_state()
-                    break
+        # Encounter effects
+        self.match_count += 1
+        if self.encounter_mode and self.match_count % 5 == 0:
+            print(f"[Encounter Triggered] Mode: {self.encounter_mode}")
+            self.trigger_encounter_effect()
+            self.encounter_trigger_in = 5
+        elif self.encounter_mode:
+            self.encounter_trigger_in -= 1
+
+        self.selected_tiles.clear()
+        self.update()
+
 
 
     def update_game_state(self):
@@ -1769,6 +1825,22 @@ class MahjongGame(QWidget):
                 modifiers["Epic"] += 0.5
         return modifiers
 
+    def empty_score(self):
+        excess_score = max(0, self.score - self.target_score)
+
+        print(f"excess score before {excess_score}")
+
+        for item in self.inventory:
+            if item['title'] == "Golem":
+                penalty = item['effects']['score_multiplier']
+                excess_score = int(excess_score * penalty)
+                wallet_gain = excess_score
+                print(f"wallet_gain score after {wallet_gain}")
+        else:
+            wallet_gain = excess_score
+
+        self.wallet += wallet_gain
+
     def enter_shop_screen(self):
         print("[SHOP] Entering shop screen...")
 
@@ -1776,11 +1848,7 @@ class MahjongGame(QWidget):
         self.reroll_price = self.reroll_base_price  # ✅ Reset reroll cost
 
         # Transfer leftover points
-        leftover = self.score - self.target_score
-        print(f"[SHOP] Calculated leftover points: {leftover}")
-        if leftover > 0:
-            self.wallet += leftover
-            print(f"[SHOP] Wallet updated: {self.wallet}")
+        self.empty_score()
 
         self.shop_selected_item_index = None
         self.shop_message = ""
@@ -2622,8 +2690,8 @@ class MahjongGame(QWidget):
 
     def swap_tarot_tiles_moon_sun(self):
         board = self.board.copy()
-        sun_tiles = [tile for tile in board if tile.tarot == 'thesun']
-        moon_tiles = [tile for tile in board if tile.tarot == 'themoon']
+        sun_tiles = [tile for tile in board if tile['name'] == 'thesun']
+        moon_tiles = [tile for tile in board if tile['name'] == 'themoon']
 
         count = min(len(sun_tiles), len(moon_tiles))
         for i in range(count):
@@ -2631,13 +2699,13 @@ class MahjongGame(QWidget):
             moon = moon_tiles[i]
 
             # Swap positions
-            sun.grid_x, moon.grid_x = moon.grid_x, sun.grid_x
-            sun.grid_y, moon.grid_y = moon.grid_y, sun.grid_y
-            sun.z, moon.z = moon.z, sun.z
+            sun['grid_x'], moon['grid_x'] = moon['grid_x'], sun['grid_x']
+            sun['grid_y'], moon['grid_y'] = moon['grid_y'], sun['grid_y']
+            sun['z'], moon['z'] = moon['z'], sun['z']
 
-            # Optional: swap screen positions (if calculated already)
-            sun.x, moon.x = moon.x, sun.x
-            sun.y, moon.y = moon.y, sun.y
+            # Optional: swap screen positions
+            sun['x'], moon['x'] = moon['x'], sun['x']
+            sun['y'], moon['y'] = moon['y'], sun['y']
 
         return board
 
@@ -2647,9 +2715,39 @@ class MahjongGame(QWidget):
             increase = 1
         return increase
 
+    def handle_golem_match(self, tile) -> int:
+        score_multiplier = 1
+
+        if self.has_golem_item() and tile == "wheeloffortune":
+            chance = random.randint(1, 12)
+            if chance == 12:
+                score_multiplier = 2
+                print("Fortune Favors You")
+
+        return score_multiplier
+
+    def get_scoring_multipliers(self):
+        scoring_mult = 1
+
+        for item in self.inventory:
+            if item['title'] == "Vampyre":
+                moons = self.get_count_exposed_tiles_of_name("themoon")
+                scoring_mult += moons
+            if item['title'] == "Chupacabra":
+                scoring_mult *= 2
+
+        return scoring_mult
+
+
     def has_lycanthrope_item(self) -> bool:
         for item in self.inventory:
             if item.get("unique_id") == "lycanthrope":
+                return True
+        return False
+
+    def has_golem_item(self) -> bool:
+        for item in self.inventory:
+            if item.get("unique_id") == "golem":
                 return True
         return False
 
