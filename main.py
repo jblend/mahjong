@@ -809,7 +809,7 @@ class MahjongGame(QWidget):
                 print("[CLICK] Start New Game from Game Over screen")
                 self.in_game_over = False
                 self.reset_game_state()
-                self.start_new_round()
+                self.start_new_game()
                 return
 
         # Tile selection fallback
@@ -825,7 +825,7 @@ class MahjongGame(QWidget):
             traceback.print_exc()
             return []
 
-    def reroll_shop(self):
+    def reroll_shop(self, allow_duplicates_from_inventory=False):
         print("[REROLL] Attempting shop reroll...")
 
         if self.wallet < self.reroll_price:
@@ -834,24 +834,47 @@ class MahjongGame(QWidget):
             return
 
         self.wallet -= self.reroll_price
-        self.reroll_price += 25  # Increase cost with each reroll
+        self.reroll_price += 25
         print(f"[REROLL] Deducted {self.reroll_price - 25}, new wallet: {self.wallet}, next cost: {self.reroll_price}")
 
-        # Remove placeholder items
-        self.shop_items = [item for item in self.shop_items if not item.get("placeholder")]
+        # Step 1: Store previous shop titles before purging
+        previous_shop_titles = {item.get("title") for item in self.shop_items if "title" in item}
 
-        # Track inventory titles to avoid duplicates
-        owned_titles = {item.get("title") for item in self.inventory}
+        # Step 2: Clear the shop entirely (including placeholders)
+        self.shop_items = []
 
-        while len(self.shop_items) < 4:
-            new_item = self.get_random_shop_item(owned_titles)
+        # Step 3: Track exclusions
+        inventory_titles = {item["title"] for item in self.inventory} if not allow_duplicates_from_inventory else set()
+        exclude_titles = inventory_titles.union(previous_shop_titles)
+
+        # Step 4: Try to populate with 4 new unique items
+        attempts = 0
+        max_attempts = 50
+        while len(self.shop_items) < 4 and attempts < max_attempts:
+            new_item = self.get_random_shop_item(exclude_titles)
             if new_item:
                 self.shop_items.append(new_item)
-                owned_titles.add(new_item.get("title"))
+                exclude_titles.add(new_item.get("title"))
             else:
-                break  # Stop if no more valid items
+                break  # If no new item is found, exit loop
+            attempts += 1
+
+        # Step 5: Fallback fill (allow duplicates if needed to reach 4)
+        if len(self.shop_items) < 4:
+            print(f"[REROLL] Only {len(self.shop_items)} unique items found. Using fallback...")
+            fallback_exclude = {item["title"] for item in self.shop_items if "title" in item}
+            while len(self.shop_items) < 4:
+                fallback_item = self.get_random_shop_item(fallback_exclude, skip_inventory_check=True)
+                if fallback_item:
+                    self.shop_items.append(fallback_item)
+                    fallback_exclude.add(fallback_item["title"])
+                else:
+                    self.shop_items.append({"title": "Sold Out", "placeholder": True})
+                    print("[REROLL] Injected placeholder to meet 4-item requirement.")
+                    break
 
         self.shop_message = "Shop rerolled!"
+        print(f"[REROLL] Shop now contains {len(self.shop_items)} items.")
         self.update()
 
     def trigger_inventory_item_effect(self, index):
@@ -917,6 +940,32 @@ class MahjongGame(QWidget):
             self.score += item.get("value", 100)
         elif effect_type == "swap_tarot_tiles_moon_sun":
             self.swap_tarot_tiles_moon_sun()
+        elif effect_type == "banish_to_bottom":
+            if item["effect"] == "banish_to_bottom":
+                if len(self.selected_tiles) == 1:
+                    self.banish_tile_to_bottom()
+                    item["charge"] -= 1
+                    item["cooldown"] = item.get("cooldown_match", 20)
+
+                    print(f"[ITEM] {item['title']} used. Remaining charges: {item['charge']}")
+                else:
+                    print(f"[ITEM] {item['title']} requires exactly 1 selected tile.")
+        elif effect_type == "doppelganger_swap":
+            if len(self.selected_tiles) == 1:
+                tile = self.get_selected_tile()
+                if tile:
+                    self.doppelganger_swap(tile)
+                    item["charge"] -= 1
+                    item["cooldown"] = item.get("cooldown_match", 11)
+                else:
+                    print("[ITEM] Doppelganger requires exactly 1 selected tile.")
+        elif effect_type == "dullahan_drop":
+            self.dullahan_drop(item)
+        elif effect_type == "arachne_swap":
+            self.arachne_swap(item)
+        elif effect_type == "djinn_wish":
+            self.djinn_wish(item)
+
         else:
             print(f"[EFFECT] No defined logic for effect: {effect_type}")
 
@@ -950,6 +999,9 @@ class MahjongGame(QWidget):
 
 
     def get_possible_match_count(self):
+        if len(self.board) == 0:
+            return 0
+
         name_counts = {}
         for tile in self.get_selectable_tiles():
             name = tile["name"]
@@ -965,11 +1017,21 @@ class MahjongGame(QWidget):
 
     def check_for_inventory_passives(self):
         base_target = self.get_base_target_score()
+        if hasattr(self, "djinn_active") and self.djinn_active:
+            base_target += self.djinn_target_increase
+            print(f"[DJINN] Increased target score to {base_target} due to wish.")
+
+
         reduction = 1
         for item in self.inventory:
             if item['title'] == "Golem":
                 reduction = int(item['effects']['reduction'])
             self.target_score = int(max(0, base_target/reduction))
+            if item["unique_id"] == "banshee":
+                increase = item.get("effects", {}).get("target_score_increase", 0)
+                base_target += increase
+                print(f"[BANSHEE] Increased target score by {increase}. New target: {self.target_score}")
+
         else:
             self.target_score = base_target
 
@@ -982,7 +1044,10 @@ class MahjongGame(QWidget):
         for item in self.inventory:
             if item["title"] == "Vampyre":
                 drain_percent = self.get_count_exposed_tiles_of_name("thesun")
-                cost = int(self.wallet / drain_percent)
+                if drain_percent == 0:
+                    cost = 0
+                else:
+                    cost = int(self.wallet / drain_percent)
                 if self.wallet >= cost:
                     print(f"before the blood sucker {self.wallet}")
                     self.wallet = cost
@@ -992,11 +1057,21 @@ class MahjongGame(QWidget):
                     self.inventory.remove(item)
                     # self.display_message("Vampyr was consumed — insufficient funds.")
             if item["title"] == "Chupacabra":
-                cost = int(self.wallet / item["effect"]["wallet_drain_percent"])
+                cost = int(self.wallet * item["effect"]["wallet_drain_percent"])
                 if self.wallet >= cost:
                     print(f"before the blood sucker {self.wallet}")
                     self.wallet = cost
                     print(f"after the blood sucker {self.wallet}")
+                else:
+                    # Remove Chupacabra from inventory
+                    self.inventory.remove(item)
+                    # self.display_message("Chupacabra was consumed — insufficient funds.")
+            if item["title"] == "Dragon":
+                cost = int(self.wallet * item["effect"]["wallet_drain_percent"])
+                if self.wallet >= cost:
+                    print(f"before the dargon {self.wallet}")
+                    self.wallet = cost
+                    print(f"after the dargon {self.wallet}")
                 else:
                     # Remove Chupacabra from inventory
                     self.inventory.remove(item)
@@ -1229,6 +1304,12 @@ class MahjongGame(QWidget):
             self.board.append(tile)
             self.tile_positions[(gx, gy, gz)] = tile
 
+            # After the board is set up, apply tile modifications
+        for item in self.inventory:
+            if item.get("type") == "start_of_round" and item["unique_id"] == "banshee":
+                if item.get("effects", {}).get("death_tile_force_selectable", False):
+                    self.force_death_tiles_selectable()
+
         # Save for global reference
         self.offset_x = offset_x
         self.offset_y = offset_y
@@ -1401,8 +1482,22 @@ class MahjongGame(QWidget):
         # self.update_hover_state()  # ✅ Trigger hover check immediately
         # self.update()  # ✅ Repaint if hover card changes
 
+    def calculate_top_tiles(self):
+        self.top_tiles = set()
+        for tile in self.board:
+            gx, gy = tile["grid_x"], tile["grid_y"]
+            if not any(
+                    other for other in self.board
+                    if other["grid_x"] == gx and
+                       other["grid_y"] == gy and
+                       other["z"] > tile["z"]
+            ):
+                self.top_tiles.add((gx, gy))
+
+
     def update_canvas(self):
         ACTION_BAR_HEIGHT = 100
+        self.calculate_top_tiles()
         self.clear_background()
         self.draw_background_tiles()
         self.draw_tile_shadows()
@@ -1410,7 +1505,7 @@ class MahjongGame(QWidget):
         self.draw_exposed_tiles()
         self.draw_animating_tiles()
         self.draw_fading_tiles()
-        self.draw_fog_of_war()
+        # self.draw_fog_of_war()
         self.draw_combo_fuse()
         self.action_bar.draw()  # External call to encapsulated class
         self.draw_particles()
@@ -1447,8 +1542,7 @@ class MahjongGame(QWidget):
     def draw_exposed_tiles(self):
         exposed_tiles = [
             tile for tile in self.board
-            if tile.get("will_become_exposed") and
-               (tile["grid_x"], tile["grid_y"]) not in self.top_tiles
+            if tile.get("will_become_exposed")
         ]
         exposed_tiles.sort(key=lambda t: t["z"])
         for tile in exposed_tiles:
@@ -1457,6 +1551,7 @@ class MahjongGame(QWidget):
                 temp_img = img.copy()
                 temp_img.set_alpha(tile.get("alpha", 255))
                 self.surface.blit(temp_img, (tile["x"], tile["y"]))
+            tile["will_become_exposed"] = False  # ✅ Clear after drawing
 
     def draw_animating_tiles(self):
         for tile in self.animating_tiles:
@@ -1662,16 +1757,25 @@ class MahjongGame(QWidget):
 
         self.fading_matched_tiles = matched
         self.match_sound.play()
+        self.tick_item_cooldowns()
 
         # Lycanthrope conditional bonus
         self.combo_level += self.handle_lycan_match(tile1["name"], lycanthrope_active=self.has_lycanthrope_item())
 
         # Apply base score, including item-triggered modifiers
         score_multiplier = self.handle_golem_match(tile1)
+
+        base_score = self.base_score
+
+        for item in self.inventory:
+            if item['unique_id'] == "dragon" and self.wallet > 0:
+                wallet_bonus = int(self.wallet/100)
+                base_score += wallet_bonus
+
         self.score *= score_multiplier
 
         scoring_mult = self.get_scoring_multipliers()
-        score = self.base_score * scoring_mult
+        score = base_score * scoring_mult
         self.modify_score(tile1['name'], score)
 
         # Combo logic
@@ -1691,21 +1795,58 @@ class MahjongGame(QWidget):
         self.selected_tiles.clear()
         self.update()
 
-
-
     def update_game_state(self):
         moves = self.get_possible_match_count()
-        if self.debug:
-            moves = 0
 
-        print(f"Updating Game State, Moves left: {moves} Target Score: {self.target_score}")
-        if moves <= 0:
-            if self.score < self.target_score:
-                print("[STATE] No moves left and target score NOT reached → Game Over")
-                self.trigger_game_over()
-            else:
-                print("[STATE] No moves left but target score met → Entering Shop")
+        if moves > 0:
+            return
+
+        # No more moves, evaluate result
+        round_success = self.score >= self.target_score
+
+        if not round_success:
+            if getattr(self, "djinn_active", False):
+                print("[DJINN] Target not met but Djinn active → Forgo game over.")
+                self.wallet = 0
+
+                item = getattr(self, "djinn_current_item", None)
+                if item:
+                    item["charges"] -= 1
+                    print(f"[DJINN] Charge used. Remaining: {item['charge']}")
+
+                    if item["charges"] <= 0:
+                        print("[DJINN] All charges used. Item consumed.")
+                        if item in self.inventory:
+                            self.inventory.remove(item)
+
+                # Clear Djinn flags
+                self.djinn_active = False
+                self.djinn_target_increase = 0
+                self.djinn_current_item = None
+
                 self.enter_shop_screen()
+                return  # Prevent game over
+
+            else:
+                self.trigger_game_over()
+
+        else:
+            print("[STATE] No moves left but target score met → Entering Shop")
+
+            # If Djinn was active and we succeeded, still consume a charge
+            if getattr(self, "djinn_active", False):
+                # Consume one charge per use (already done), now resolve outcome
+                for item in getattr(self, "djinn_used_items", []):
+                    if not round_success:
+                        print("[DJINN] Failed round with active Djinn. Wallet is now 0.")
+                        self.wallet = 0
+                        break  # Only one fail triggers the wallet nuke
+
+                self.djinn_active = False
+                self.djinn_target_increase = 0
+                self.djinn_used_items = []
+                self.enter_shop_screen()
+                return
 
     def trigger_game_over(self):
         print("[GAME OVER] Triggered")
@@ -1773,7 +1914,7 @@ class MahjongGame(QWidget):
         self.surface.blit(shadow_text, (text_x + 2, text_y + 2))
         self.surface.blit(btn_text, (text_x, text_y))
 
-    def get_random_shop_item(self, exclude_titles=None):
+    def get_random_shop_item(self, exclude_titles=None, skip_inventory_check=False):
         if exclude_titles is None:
             exclude_titles = set()
 
@@ -1781,32 +1922,32 @@ class MahjongGame(QWidget):
             with open(ITEMS, "r") as f:
                 all_items = json.load(f)
 
-            # Exclude duplicates
-            inventory_titles = {item["title"] for item in self.inventory}
-            current_shop_titles = {item["title"] for item in self.shop_items}
-            exclude_titles.update(inventory_titles)
-            exclude_titles.update(current_shop_titles)
+            all_items = [item for item in all_items if "title" in item]
 
-            valid_items = [item for item in all_items if
-                           item.get("title") not in exclude_titles and not item.get("placeholder")]
+            valid_items = [
+                item for item in all_items
+                if item["title"] not in exclude_titles and not item.get("placeholder")
+            ]
 
             if not valid_items:
+                if skip_inventory_check:
+                    fallback_items = [
+                        item for item in all_items if not item.get("placeholder")
+                    ]
+                    if fallback_items:
+                        print("[SHOP] Using fallback pool.")
+                        return random.choice(fallback_items)
                 print("[SHOP WARNING] No valid items to choose from.")
                 return None
 
-            # Apply rarity weights
             rarity_mods = self.get_rarity_modifiers()
             weighted_pool = []
             for item in valid_items:
                 rarity = item.get("rarity", "Common")
                 weight = rarity_mods.get(rarity, 1.0)
-                weighted_pool.extend([item] * int(weight * 10))  # Multiplier scale
+                weighted_pool.extend([item] * int(weight * 10))
 
-            if not weighted_pool:
-                print("[SHOP WARNING] No weighted items to choose from.")
-                return None
-
-            return random.choice(weighted_pool)
+            return random.choice(weighted_pool) if weighted_pool else None
 
         except Exception as e:
             print("[SHOP ERROR] Failed to get random shop item.")
@@ -1834,8 +1975,9 @@ class MahjongGame(QWidget):
             if item['title'] == "Golem":
                 penalty = item['effects']['score_multiplier']
                 excess_score = int(excess_score * penalty)
-                wallet_gain = excess_score
-                print(f"wallet_gain score after {wallet_gain}")
+            if item['title'] == "Leprechaun":
+                excess_score = int(excess_score * 2)
+
         else:
             wallet_gain = excess_score
 
@@ -2738,6 +2880,10 @@ class MahjongGame(QWidget):
 
         return scoring_mult
 
+    def get_wallet_multipliers(self):
+        wallet_mult = 1
+        return wallet_mult
+
 
     def has_lycanthrope_item(self) -> bool:
         for item in self.inventory:
@@ -2751,6 +2897,403 @@ class MahjongGame(QWidget):
                 return True
         return False
 
+    def has_leprechaun_item(self) -> bool:
+        for item in self.inventory:
+            if item.get("unique_id") == "leprechaun":
+                return True
+            return False
+
+    def has_dragon_item(self) -> bool:
+        for item in self.inventory:
+            if item.get("unique_id") == "dragon":
+                return True
+            return False
+
+    def get_selected_tile(self):
+        if len(self.selected_tiles) == 1:
+            return self.selected_tiles[0]
+        return None
+
+    def is_top_of_stack(self, tile):
+        gx, gy, z = tile["grid_x"], tile["grid_y"], tile["z"]
+        return not any(
+            t for t in self.board
+            if t["grid_x"] == gx and t["grid_y"] == gy and t["z"] > z
+        )
+
+    def banish_tile_to_bottom(self):
+
+        tile = self.get_selected_tile()
+
+        gx, gy = tile["grid_x"], tile["grid_y"]
+
+        # Get all tiles in this grid column (including the target tile)
+        stack = [t for t in self.board if t["grid_x"] == gx and t["grid_y"] == gy]
+
+        if len(stack) <= 1:
+            print("[BANISH] No stack to modify.")
+            return
+
+        print(f"[BANISH] Reordering stack at ({gx}, {gy}). Stack size: {len(stack)})")
+
+        # Step 1: Increment z of all tiles in the stack
+        for t in stack:
+            t["z"] += 1
+
+        # Step 2: Move selected tile to z = 0
+        tile["z"] = 0
+
+        print(f"[BANISH] Tile '{tile['name']}' moved to bottom (z=0).")
+
+        # Step 3: Re-sort rendering or game state if needed
+        self.update_game_state()
+        self.update()
+
+    def doppelganger_swap(self, tile):
+        if not tile:
+            print("[DOPPELGANGER] No tile selected.")
+            return
+
+        tile_name = tile["name"]
+
+        # Step 1: Find the closest matching tile
+        matching_tiles = [
+            t for t in self.board
+            if t != tile and t["name"] == tile_name
+        ]
+
+        if not matching_tiles:
+            print("[DOPPELGANGER] No matching tiles found.")
+            return
+
+        matching_tile = min(
+            matching_tiles,
+            key=lambda t: (t["x"] - tile["x"]) ** 2 + (t["y"] - tile["y"]) ** 2
+        )
+
+        # Step 2: Find the closest selectable tile with no available match
+        def has_available_match(target):
+            return any(
+                other for other in self.board
+                if other != target and
+                other["name"] == target["name"] and
+                self.is_tile_selectable(other) and
+                self.is_tile_selectable(target)
+            )
+
+        nonmatch_tiles = [
+            t for t in self.board
+            if t != matching_tile and
+               self.is_tile_selectable(t) and
+               not has_available_match(t)
+        ]
+
+        if not nonmatch_tiles:
+            print("[DOPPELGANGER] No unmatchable selectable tiles found.")
+            return
+
+        swap_target = min(
+            nonmatch_tiles,
+            key=lambda t: (t["x"] - matching_tile["x"]) ** 2 + (t["y"] - matching_tile["y"]) ** 2
+        )
+
+        # Step 3: Swap grid positions and z
+        print(f"[DOPPELGANGER] Swapping '{matching_tile['name']}' with unmatchable '{swap_target['name']}'")
+
+        matching_tile["grid_x"], swap_target["grid_x"] = swap_target["grid_x"], matching_tile["grid_x"]
+        matching_tile["grid_y"], swap_target["grid_y"] = swap_target["grid_y"], matching_tile["grid_y"]
+        matching_tile["x"], swap_target["x"] = swap_target["x"], matching_tile["x"]
+        matching_tile["y"], swap_target["y"] = swap_target["y"], matching_tile["y"]
+        matching_tile["z"], swap_target["z"] = swap_target["z"], matching_tile["z"]
+
+        # Refresh game state
+        self.update_game_state()
+        self.update()
+
+    def _swap_tiles(self, t1, t2):
+        t1["grid_x"], t2["grid_x"] = t2["grid_x"], t1["grid_x"]
+        t1["grid_y"], t2["grid_y"] = t2["grid_y"], t1["grid_y"]
+        t1["x"], t2["x"] = t2["x"], t1["x"]
+        t1["y"], t2["y"] = t2["y"], t1["y"]
+        t1["z"], t2["z"] = t2["z"], t1["z"]
+
+    def force_death_tiles_selectable(self):
+        print("[BANSHEE] Forcing Death tiles into guaranteed selectable positions...")
+
+        death_tiles = [t for t in self.board if t['name'] == "death"]
+        print(f"[BANSHEE] Found {len(death_tiles)} Death tiles.")
+
+        if not death_tiles:
+            print("[BANSHEE] No Death tiles to force.")
+            return
+
+        # Get all selectable tiles
+        selectable_tiles = [t for t in self.board if self.is_tile_selectable(t)]
+        print(f"[BANSHEE] Found {len(selectable_tiles)} currently selectable tiles.")
+
+        # Classify: Selectable tiles with no match
+        unmatched_selectables = [
+            t for t in selectable_tiles
+            if not any(
+                other for other in self.board
+                if other != t and other["name"] == t["name"] and self.is_tile_selectable(other)
+            )
+        ]
+        print(f"[BANSHEE] Found {len(unmatched_selectables)} unmatched selectable tiles.")
+
+        # Replace unmatched selectable tiles with Death tiles
+        replaced = 0
+        for src_tile, dst_tile in zip(death_tiles, unmatched_selectables):
+            print(
+                f"[BANSHEE] Swapping Death tile with unmatched tile '{dst_tile['name']}' at ({dst_tile['grid_x']}, {dst_tile['grid_y']})")
+
+            self._swap_tiles(src_tile, dst_tile)
+            replaced += 1
+
+        # If Death tiles remain, replace any other selectable tile
+        if replaced < len(death_tiles):
+            remaining_death_tiles = [t for t in death_tiles if t not in unmatched_selectables]
+            available_slots = [
+                t for t in selectable_tiles if t not in unmatched_selectables
+            ]
+
+            for src_tile, dst_tile in zip(remaining_death_tiles, available_slots):
+                print(
+                    f"[BANSHEE] Swapping remaining Death tile with selectable tile '{dst_tile['name']}' at ({dst_tile['grid_x']}, {dst_tile['grid_y']})")
+                self._swap_tiles(src_tile, dst_tile)
+                replaced += 1
+
+        print(f"[BANSHEE] Replaced {replaced} Death tiles into selectable positions.")
+
+        self.update_game_state()
+        self.update()
+
+    def djinn_wish(self, item):
+        if item["charges"] <= 0:
+            print("[DJINN] No charges left.")
+            return
+
+        self.wallet *= 2
+        item["charges"] -= 1
+
+        # Initialize or stack up
+        self.djinn_active = True
+        self.djinn_target_increase = getattr(self, "djinn_target_increase", 0) + int(self.target_score * 2)
+        self.djinn_used_items = getattr(self, "djinn_used_items", [])
+        self.djinn_used_items.append(item)
+
+        print(
+            f"[DJINN] Wallet doubled. Target increase now: +{self.djinn_target_increase}. Charges left: {item['charges']}")
+
+        if item["charges"] <= 0:
+            print("[DJINN] Item fully consumed.")
+            if item in self.inventory:
+                self.inventory.remove(item)
+
+    def dullahan_drop(self, item):
+        if item["charge"] <= 0:
+            print("[DULLAHAN] No charges left.")
+            return
+        if item.get("cooldown", 0) > 0:
+            print(f"[DULLAHAN] On cooldown: {item['cooldown']} matches left.")
+            return
+
+        print("[DULLAHAN] Activating Dullahan Drop...")
+
+        max_z = max(tile["z"] for tile in self.board)
+        topmost_tiles = [tile for tile in self.board if tile["z"] == max_z]
+        eligible_tiles = [tile for tile in topmost_tiles if self.is_top_of_stack(tile)]
+
+        print(f"[DULLAHAN] Found {len(eligible_tiles)} eligible topmost tiles at z={max_z}.")
+
+        used_positions = set()
+        animated_tiles = []
+
+        for tile in eligible_tiles:
+            original_gx, original_gy, original_z = tile["grid_x"], tile["grid_y"], tile["z"]
+            new_pos = self.find_dullahan_landing(tile, used_positions, original_z)
+
+
+            if new_pos:
+                gx, gy, gz = new_pos
+                used_positions.add((gx, gy))
+
+                print(
+                    f"[DULLAHAN] Moving '{tile['name']}' from ({original_gx},{original_gy},{original_z}) → ({gx},{gy},{gz})")
+
+                # Compute pixel positions using offsets
+                start_x, start_y = tile["x"], tile["y"]
+                target_x, target_y = self.get_tile_pixel_position(
+                    gx, gy, gz, TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH,
+                    self.offset_x, self.offset_y
+                )
+
+                # Prepare for animation
+                tile.update({
+                    "start_x": start_x,
+                    "start_y": start_y,
+                    "target_x": target_x,
+                    "target_y": target_y,
+                    "target_grid_x": gx,
+                    "target_grid_y": gy,
+                    "target_z": gz,
+                    "alpha": 255,
+                    "fading": False
+                })
+                animated_tiles.append(tile)
+
+                # Reveal top tile below original
+                stack_below = [
+                    t for t in self.board
+                    if t["grid_x"] == original_gx and
+                       t["grid_y"] == original_gy and
+                       t["z"] < original_z
+                ]
+                if stack_below:
+                    top_below = max(stack_below, key=lambda t: t["z"])
+                    top_below["will_become_exposed"] = True
+                    print(
+                        f"[DEBUG] Marked exposed: {top_below['name']} at ({top_below['grid_x']},{top_below['grid_y']},{top_below['z']})")
+
+        # Deduct and check for depletion
+        item["charge"] -= 1
+        item["cooldown"] = item.get("cooldown_match", 15)
+        if item["charge"] <= 0:
+            print("[DULLAHAN] Charges depleted. Removing item.")
+            if item in self.inventory:
+                self.inventory.remove(item)
+
+        self.encounter_engine.animate_dullahan_drop(animated_tiles, steps=12, interval=25)
+
+    def find_dullahan_landing(self, tile, used_positions, original_z):
+        gx, gy = tile["grid_x"], tile["grid_y"]
+        self.calculate_grid_bounds()
+        search_radius = 5
+        candidates = []
+
+        for dx in range(-search_radius, search_radius + 1):
+            for dy in range(-search_radius, search_radius + 1):
+                test_gx = gx + dx
+                test_gy = gy + dy
+
+                if (
+                        test_gx < self.min_grid_x or test_gx > self.max_grid_x or
+                        test_gy < self.min_grid_y or test_gy > self.max_grid_y
+                ):
+                    continue
+
+                if (test_gx, test_gy) in used_positions:
+                    continue
+
+                stack = [t for t in self.board if t["grid_x"] == test_gx and t["grid_y"] == test_gy]
+                test_z = max([t["z"] for t in stack], default=-1) + 1
+
+                if test_z >= original_z:
+                    continue  # ⛔ Only move downwards
+
+                if test_z > 0 and not any(
+                        t for t in self.board
+                        if t["grid_x"] == test_gx and t["grid_y"] == test_gy and t["z"] == test_z - 1
+                ):
+                    continue  # Must be supported
+
+                left_blocked = any(
+                    t for t in self.board
+                    if t["z"] == test_z and t["grid_x"] == test_gx - 1 and t["grid_y"] == test_gy
+                )
+                right_blocked = any(
+                    t for t in self.board
+                    if t["z"] == test_z and t["grid_x"] == test_gx + 1 and t["grid_y"] == test_gy
+                )
+                if left_blocked or right_blocked:
+                    continue  # Must be horizontally free (selectable)
+
+                if any(
+                        t for t in self.board
+                        if t["grid_x"] == test_gx and t["grid_y"] == test_gy and t["z"] == test_z
+                ):
+                    continue  # Already occupied
+
+                candidates.append(((test_gx, test_gy, test_z), dx ** 2 + dy ** 2))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda c: c[1])  # Sort by distance
+        return candidates[0][0]
+
+    def arachne_swap(self, item):
+        if item["charges"] <= 0:
+            print("[ARACHNE] No charges left.")
+            return
+        if item.get("cooldown", 0) > 0:
+            print(f"[ARACHNE] On cooldown: {item['cooldown']} matches left.")
+            return
+
+        print("[ARACHNE] Activating Arachne Swap...")
+
+        # Define corner grid positions (outer → inner)
+        corner_pairs = [
+            ((self.min_grid_x, self.min_grid_y), (self.min_grid_x + 1, self.min_grid_y + 1)),  # Top-left
+            ((self.max_grid_x, self.min_grid_y), (self.max_grid_x - 1, self.min_grid_y + 1)),  # Top-right
+            ((self.min_grid_x, self.max_grid_y), (self.min_grid_x + 1, self.max_grid_y - 1)),  # Bottom-left
+            ((self.max_grid_x, self.max_grid_y), (self.max_grid_x - 1, self.max_grid_y - 1)),  # Bottom-right
+        ]
+
+        swap_pairs = []
+        for (gx1, gy1), (gx2, gy2) in corner_pairs:
+            stack1 = [t for t in self.board if t["grid_x"] == gx1 and t["grid_y"] == gy1]
+            stack2 = [t for t in self.board if t["grid_x"] == gx2 and t["grid_y"] == gy2]
+
+            if not stack1 or not stack2:
+                continue
+
+            top1 = max(stack1, key=lambda t: t["z"])
+            top2 = max(stack2, key=lambda t: t["z"])
+
+            # Setup animation targets
+            temp_x1, temp_y1 = self.get_tile_pixel_position(gx2, gy2, top2["z"], TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH,
+                                                            self.offset_x, self.offset_y)
+            temp_x2, temp_y2 = self.get_tile_pixel_position(gx1, gy1, top1["z"], TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH,
+                                                            self.offset_x, self.offset_y)
+
+            top1.update({
+                "start_x": top1["x"], "start_y": top1["y"],
+                "target_x": temp_x1, "target_y": temp_y1,
+                "target_grid_x": gx2, "target_grid_y": gy2, "target_z": top2["z"],
+                "fading": False, "alpha": 255
+            })
+
+            top2.update({
+                "start_x": top2["x"], "start_y": top2["y"],
+                "target_x": temp_x2, "target_y": temp_y2,
+                "target_grid_x": gx1, "target_grid_y": gy1, "target_z": top1["z"],
+                "fading": False, "alpha": 255
+            })
+
+            swap_pairs.append((top1, top2))
+
+        # Flatten to single list for animation engine
+        anim_tiles = [tile for pair in swap_pairs for tile in pair]
+
+        if anim_tiles:
+            self.encounter_engine.animate_arachne_swap(anim_tiles)
+        else:
+            print("[ARACHNE] No valid swap pairs found.")
+
+        # Item logic
+        item["charges"] -= 1
+        item["cooldown"] = item.get("cooldown_match", 8)
+
+        if item["charges"] <= 0:
+            print("[ARACHNE] Charges depleted. Removing item.")
+            if item in self.inventory:
+                self.inventory.remove(item)
+
+    def tick_item_cooldowns(self):
+        for item in self.inventory:
+            if item.get("cooldown", 0) > 0:
+                item["cooldown"] -= 1
 
 
 if __name__ == "__main__":

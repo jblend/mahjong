@@ -1,12 +1,15 @@
 [
   {
-    "unique_id": "doppelganger",
-    "title": "Doppelganger",
-    "image": "assets/items/doppelganger.png",
-    "rarity": "common",
-    "cost": 300,
-    "description": "Destroys a large cluster of tiles."
-  },
+  "unique_id": "doppelganger",
+  "title": "Doppelganger",
+  "image": "assets/items/doppelganger.png",
+  "rarity": "common",
+  "cost": 150,
+  "charge": 1,
+  "cooldown_match": 11,
+  "description": "Find the closest tile that matches the selected tile and switch its position with the closest selectable tile that does not have an available match.",
+  "effect": "doppelganger_swap"
+},
   {
     "unique_id": "jerseydevil",
     "title": "Jersey Devil",
@@ -14,7 +17,7 @@
     "rarity": "common",
     "cost": 200,
     "charges": 3,
-    "cooldown_match": 5,
+    "cooldown_match": 20,
     "description": "Randomly rearranges the board.",
     "effect": "shuffle"
   },
@@ -99,6 +102,33 @@
     "wallet_drain_percent": 40,
     "score_multiplier": 2,
     "consumes_if_insufficient_funds": true
+    }},
+  {
+    "unique_id": "dragon",
+    "title": "Dragon",
+    "image": "assets/items/dragon.png",
+    "rarity": "epic",
+    "cost": 1000,
+    "description": "The more money you have in your wallet the higher the base score.\nHalf the amount in wallet at start of the round.",
+    "type": "start_of_round",
+    "consumes_if_insufficient_funds": true,
+    "effect": {
+    "type": "start_of_round",
+    "wallet_drain_percent": 0.50,
+    "score_multiplier": "wallet",
+    "consumes_if_insufficient_funds": true
+    }},
+  {
+    "unique_id": "leprechaun",
+    "title": "Leprechaun",
+    "image": "assets/items/leprechaun.png",
+    "rarity": "rare",
+    "cost": 500,
+    "description": "Greatly increase your take each round.",
+    "type": "end_of_round",
+    "effect": {
+    "type": "end_of_round",
+    "score_multiplier": 2
     }
   },
   {
@@ -112,10 +142,71 @@
     "consumes_if_insufficient_funds": true,
     "effect": {
     "type": "start_of_round",
-    "wallet_drain_percent": 20,
+    "wallet_drain_percent": 0.20,
     "score_multiplier": 2,
     "consumes_if_insufficient_funds": true
     }
+  },
+    {
+    "unique_id": "troll",
+    "title": "Troll",
+    "image": "assets/items/troll.png",
+    "rarity": "common",
+    "cost": 200,
+    "charges": 3,
+    "cooldown_match": 20,
+    "description": "Move the current selected tile to the bottom of its stack.",
+    "effect": "banish_to_bottom"
+    },
+    {
+  "unique_id": "banshee",
+  "title": "Banshee",
+  "image": "assets/items/banshee.png",
+  "rarity": "rare",
+  "cost": 300,
+  "type": "start_of_round",
+  "description": "Increases the target score. All Death Tarot Tiles are placed in selectable positions at the start of the round.",
+  "effects": {
+    "target_score_increase": 1000,
+    "death_tile_force_selectable": true
   }
+},
+  {
+  "unique_id": "djinn",
+  "title": "Djinn",
+  "image": "assets/items/djinn.png",
+  "rarity": "epic",
+  "cost": 1200,
+  "type": "active",
+  "charges": 3,
+  "cooldown_match": 0,
+  "description": "Use to double the money in your wallet. If you fail to reach the next target score, your wallet is emptied instead of ending the game. Djinn loses a charge either way. When all charges are used, the item is removed.",
+  "effect": "djinn_wish"
+},
+  {
+  "unique_id": "dullahan",
+  "title": "Dullahan",
+  "image": "assets/items/dullahan.png",
+  "rarity": "common",
+  "cost": 200,
+  "type": "active",
+  "charge": 5,
+  "cooldown_match": 15,
+  "description": "Moves all tiles at the highest Z positions to the closest selectable position with support. Tiles cannot be suspended in the air and must not have a tile directly beside them.",
+  "effect": "dullahan_drop"
+},
+  {
+  "unique_id": "arachne",
+  "title": "Arachne",
+  "image": "assets/items/arachne.png",
+  "description": "Swap the 4 outer corner piles with their inner counterparts.",
+  "rarity": "common",
+  "cost": 200,
+  "charges": 8,
+  "cooldown": 0,
+  "cooldown_match": 8,
+  "type": "active",
+  "effect": "arachne_swap"
+}
 
 ]

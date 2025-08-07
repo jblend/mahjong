@@ -11,6 +11,77 @@ class EncounterEngine:
     def __init__(self, context):
         self.context = context
 
+    def animate_dullahan_drop(self, tiles, steps=12, interval=25):
+        ctx = self.context
+        ctx.animation_step = 0
+        ctx.animation_steps = steps
+        ctx.animating_tiles = tiles
+
+        def animate_step():
+            if ctx.animation_step >= ctx.animation_steps:
+                for tile in ctx.animating_tiles:
+                    tile.update({
+                        "x": tile["target_x"],
+                        "y": tile["target_y"],
+                        "grid_x": tile["target_grid_x"],
+                        "grid_y": tile["target_grid_y"],
+                        "z": tile["target_z"],
+                        "alpha": 255
+                    })
+                    tile.pop("fading", None)
+
+                ctx.rebuild_tile_positions()
+                ctx.animating_tiles = []
+                ctx.update_canvas()
+                return
+
+            progress = (ctx.animation_step + 1) / ctx.animation_steps
+            for tile in ctx.animating_tiles:
+                tile["x"] = tile["start_x"] + (tile["target_x"] - tile["start_x"]) * progress
+                tile["y"] = tile["start_y"] + (tile["target_y"] - tile["start_y"]) * progress
+                tile["alpha"] = 255  # Optional: can also fade or style drop differently
+
+            ctx.animation_step += 1
+            ctx.update_canvas()
+            QTimer.singleShot(interval, animate_step)
+
+        animate_step()
+
+    def animate_arachne_swap(self, tiles, steps=12, interval=30):
+        ctx = self.context
+        ctx.animation_step = 0
+        ctx.animation_steps = steps
+        ctx.animating_tiles = tiles
+
+        def animate_step():
+            if ctx.animation_step >= ctx.animation_steps:
+                for tile in tiles:
+                    tile.update({
+                        "x": tile["target_x"],
+                        "y": tile["target_y"],
+                        "grid_x": tile["target_grid_x"],
+                        "grid_y": tile["target_grid_y"],
+                        "z": tile["target_z"],
+                        "alpha": 255
+                    })
+                    tile.pop("fading", None)
+
+                ctx.rebuild_tile_positions()
+                ctx.animating_tiles = []
+                ctx.update_canvas()
+                return
+
+            progress = (ctx.animation_step + 1) / ctx.animation_steps
+            for tile in tiles:
+                tile["x"] = tile["start_x"] + (tile["target_x"] - tile["start_x"]) * progress
+                tile["y"] = tile["start_y"] + (tile["target_y"] - tile["start_y"]) * progress
+
+            ctx.animation_step += 1
+            ctx.update_canvas()
+            QTimer.singleShot(interval, animate_step)
+
+        animate_step()
+
     def animate_crush_tiles(self, tiles, steps=12, interval=25):
         ctx = self.context
         ctx.animation_step = 0
