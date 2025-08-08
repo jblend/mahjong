@@ -128,6 +128,16 @@ class ActionBar:
         bar_y = self.surface.get_height() - 100
         button_size = 40
 
+        # Only rescale icons if size changes
+        if getattr(self, "_last_music_button_size", None) != button_size:
+            self._last_music_button_size = button_size
+            self._scaled_prev_icon = pygame.transform.smoothscale(
+                self.icon_images["prev"], (button_size - 10, button_size - 10)
+            )
+            self._scaled_next_icon = pygame.transform.smoothscale(
+                self.icon_images["next"], (button_size - 10, button_size - 10)
+            )
+
         try:
             track_file = self.game.music_manager.get_current_track_name()
             current_track_name = os.path.splitext(os.path.basename(track_file))[0]
@@ -141,15 +151,13 @@ class ActionBar:
         prev_rect = pygame.Rect(padding + 250, bar_y + 45, button_size, button_size)
         pygame.draw.rect(self.surface, (60, 60, 60), prev_rect)
         pygame.draw.rect(self.surface, (15, 15, 15), prev_rect, 2)
-        scaled_prev = pygame.transform.smoothscale(self.icon_images["prev"], (button_size - 10, button_size - 10))
-        self.surface.blit(scaled_prev, scaled_prev.get_rect(center=prev_rect.center))
+        self.surface.blit(self._scaled_prev_icon, self._scaled_prev_icon.get_rect(center=prev_rect.center))
         self.button_rects["prev_track"] = prev_rect
 
         next_rect = pygame.Rect(padding + 300, bar_y + 45, button_size, button_size)
         pygame.draw.rect(self.surface, (60, 60, 60), next_rect)
         pygame.draw.rect(self.surface, (15, 15, 15), next_rect, 2)
-        scaled_next = pygame.transform.smoothscale(self.icon_images["next"], (button_size - 10, button_size - 10))
-        self.surface.blit(scaled_next, scaled_next.get_rect(center=next_rect.center))
+        self.surface.blit(self._scaled_next_icon, self._scaled_next_icon.get_rect(center=next_rect.center))
         self.button_rects["next_track"] = next_rect
 
     def __draw_volume_slider(self):
@@ -188,26 +196,82 @@ class ActionBar:
         start_x = surface_w - (slot_w + slot_margin) * 5 - padding
         slot_y = bar_y - 10
 
+        # Setup drag state (from game)
+        dragging_idx = getattr(self.game, "dragging_item_idx", None)
+        drag_pos = getattr(self.game, "drag_mouse_pos", None)
+        hover_drop = getattr(self.game, "hover_drop_index", None)
+
+        # Cache for scaled icons (avoid scaling every frame)
+        if not hasattr(self, "_inv_icon_cache"):
+            self._inv_icon_cache = {}  # {(path, slot_w, slot_h): Surface}
+
+        def get_scaled_icon(icon_path):
+            key = (icon_path, slot_w, slot_h)
+            surf = self._inv_icon_cache.get(key)
+            if surf:
+                return surf
+            full_path = os.path.join(BASE_DIR, icon_path)
+            if not os.path.exists(full_path):
+                return None
+            raw = pygame.image.load(full_path).convert_alpha()
+            surf = pygame.transform.smoothscale(raw, (slot_w - 4, slot_h - 4))
+            self._inv_icon_cache[key] = surf
+            return surf
+
+        # Build & draw slots
+        self.slot_rects = []
         for i in range(5):
             rect = pygame.Rect(start_x + i * (slot_w + slot_margin), slot_y, slot_w, slot_h)
+            self.slot_rects.append(rect)
+
             is_hovered = (i == self.game.hovered_inventory_index)
             is_selected = (i == self.game.selected_inventory_index)
+            is_drop_target = (hover_drop == i and dragging_idx is not None)
 
+            # Base slot visuals
             bg_color = (100, 100, 100) if is_selected else (80, 80, 80)
             border_color = (255, 255, 0) if is_hovered else (200, 200, 200)
+            if is_drop_target:
+                border_color = (120, 190, 255)  # highlight drop target
 
             pygame.draw.rect(self.surface, bg_color, rect)
             pygame.draw.rect(self.surface, border_color, rect, 2)
 
-            if i < len(self.game.inventory):
+            # Draw icon (skip if this is the tile being dragged so we don't double-draw)
+            if 0 <= i < len(self.game.inventory):
                 inv_item = self.game.inventory[i]
-                icon_path = inv_item.get("image", None)
-                if icon_path:
-                    full_path = os.path.join(BASE_DIR, icon_path)
-                    if os.path.exists(full_path):
-                        icon = pygame.image.load(full_path).convert_alpha()
-                        icon = pygame.transform.scale(icon, (slot_w - 4, slot_h - 4))
-                        self.surface.blit(icon, (rect.x + 2, rect.y + 2))
+                if inv_item:
+                    if i != dragging_idx:
+                        icon_path = inv_item.get("image")
+                        if icon_path:
+                            icon = get_scaled_icon(icon_path)
+                            if icon:
+                                self.surface.blit(icon, (rect.x + 2, rect.y + 2))
+                    else:
+                        # Draw a faint placeholder in the source slot while dragging
+                        pygame.draw.rect(self.surface, (60, 60, 60), rect)
+                        pygame.draw.rect(self.surface, (120, 120, 120), rect, 2)
 
+            # Keep button mapping intact
             self.button_rects[f"inventory_{i}"] = rect
+
+        # Draw dragged item ghost last so it’s above everything
+        if dragging_idx is not None and drag_pos and dragging_idx < len(self.game.inventory):
+            inv_item = self.game.inventory[dragging_idx]
+            if inv_item:
+                icon_path = inv_item.get("image")
+                if icon_path:
+                    icon = get_scaled_icon(icon_path)
+                    if icon:
+                        ghost = icon.copy()
+                        ghost.set_alpha(200)  # a bit transparent
+                        gx = drag_pos[0] - (icon.get_width() // 2)
+                        gy = drag_pos[1] - (icon.get_height() // 2)
+                        self.surface.blit(ghost, (gx, gy))
+                        # optional ghost outline
+                        pygame.draw.rect(self.surface, (120, 190, 255), (gx, gy, icon.get_width(), icon.get_height()),
+                                         2)
+
+
+
 

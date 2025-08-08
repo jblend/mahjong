@@ -190,7 +190,7 @@
   "rarity": "common",
   "cost": 200,
   "type": "active",
-  "charge": 5,
+  "charges": 5,
   "cooldown_match": 15,
   "description": "Moves all tiles at the highest Z positions to the closest selectable position with support. Tiles cannot be suspended in the air and must not have a tile directly beside them.",
   "effect": "dullahan_drop"
@@ -207,6 +207,16 @@
   "cooldown_match": 8,
   "type": "active",
   "effect": "arachne_swap"
+},
+{
+  "unique_id": "wendigo",
+  "title": "Wendigo",
+  "image": "assets/items/wendigo.png",
+  "rarity": "rare",
+  "type": "passive",
+  "charges": 4,
+  "cooldown_match": 0,
+  "cost": 500,
+  "description": "At start of round: lose 1 charge. Halves cooldowns and charges of other items. At end of round: destroy the item to the right; if destroyed, gain 1 charge."
 }
-
 ]

@@ -1,6 +1,7 @@
 import datetime
 import sys
-import os
+import os, sys
+from pathlib import Path
 import random
 from typing import List, Tuple
 import pandas as pd;
@@ -23,6 +24,14 @@ def get_base_dir():
         return os.path.dirname(sys.executable)
     else:
         return os.path.dirname(os.path.abspath(__file__))
+
+def resource_path(*parts):
+    """
+    Get absolute path to resource, works for dev and PyInstaller.
+    Usage: resource_path("assets", "items", "golem.png")
+    """
+    base = getattr(sys, "_MEIPASS", os.path.abspath("."))
+    return str(Path(base, *parts))
 
 BASE_DIR = get_base_dir()
 
@@ -99,8 +108,18 @@ class MahjongGame(QWidget):
             self.setMouseTracking(True)
             self.setGeometry(100, 100, HEIGHT, WIDTH)
             self.ACTION_BAR_HEIGHT = 80
+            # Rectangle area for the action bar at bottom of the window
+            self.action_bar_rect = pygame.Rect(
+                0,
+                self.height() - self.ACTION_BAR_HEIGHT,
+                self.width(),
+                self.ACTION_BAR_HEIGHT
+            )
+
             self.debug = False
             self.base_score = 5
+
+            self.click_activation_threshold = 8
 
             self.show_booster_selector = False
             self.booster_history = []
@@ -110,8 +129,16 @@ class MahjongGame(QWidget):
             self.selected_booster_tiles = []
             self.booster_pack_cost = 75
 
+            self.sell_confirm_data = None
+            self.show_sell_confirm = False
+            self.sell_target_index = None
+            self.sell_popup_rect = pygame.Rect(0, 0, 0, 0)
+            self.confirm_button_rect = pygame.Rect(0, 0, 0, 0)
+            self.cancel_button_rect = pygame.Rect(0, 0, 0, 0)
+
             self.encounter_engine = EncounterEngine(self)
             self.in_shop = False
+            self.sell_confirm_data = None  # None means no prompt showing
             self.in_game_over = False
             self.game_over_button_rect = pygame.Rect(80, 400, 200, 40)  # Same size as shop_continue
             self.game_over_flash_toggle = True
@@ -149,8 +176,21 @@ class MahjongGame(QWidget):
             self.tile_match_count = {}  # e.g., {"Tower": 2, "Moon": 1}
             self.combo_multiplier = 1
 
+            self.dragging_item_idx = None
+            self.drag_start_pos = None
+            self.hover_drop_index = None
+            self.click_activation_threshold = 8  # pixels -> treat as click if mouse moved less than this
+
 
             self.selected_inventory_index = {}
+            # Inventory drag state
+            self.dragging_item = False
+            self.is_dragging_inventory = False
+            self.dragging_item_idx = None
+            self.drag_start_pos = None
+            self.drag_mouse_pos = None
+            self.hover_drop_index = None
+            self.click_activation_threshold = 8  # pixels; < threshold = treat as click
             self.hovered_inventory_index = None
 
             # For UI tracking
@@ -669,15 +709,45 @@ class MahjongGame(QWidget):
         y = event.pos().y()
         self.last_mouse_pos = (x, y)
 
-        # print("[DEBUG] Mouse click at:", (x, y))
+        # --- SELL CONFIRMATION OVERLAY: handle it FIRST so clicks go to the modal ---
+        if getattr(self, "show_sell_confirm", False):
+            # Use (x,y) not QPoint for collidepoint
+            if self.confirm_button_rect.collidepoint(x, y):
+                idx = self.sell_target_index
+                if idx is not None and 0 <= idx < len(self.inventory):
+                    item = self.inventory[idx]
+                    if item:
+                        sell_price = int(item.get("cost", 0) * 0.5)
+                        self.wallet += sell_price
+                        removed = self.inventory.pop(idx)  # REMOVE, don't set None
+                        print(f"[SELL] Sold '{removed.get('title', '?')}' for {sell_price}. Wallet: {self.wallet}")
+                self.show_sell_confirm = False
+                self.sell_target_index = None
+                self.update_canvas()
+                return
+
+            if self.cancel_button_rect.collidepoint(x, y):
+                print("[SELL] Cancelled")
+                self.show_sell_confirm = False
+                self.sell_target_index = None
+                self.update_canvas()
+                return
+
+            # Optional: click outside modal cancels
+            if not self.sell_popup_rect.collidepoint(x, y):
+                self.show_sell_confirm = False
+                self.sell_target_index = None
+                self.update_canvas()
+                return
+
+        # Debug visual
         pygame.draw.circle(self.surface, (255, 0, 0), (x, y), 5)
 
-        handled = False  # Track whether anything handled the click
+        handled = False
 
+        # ---- BUTTONS ----
         for name, rect in self.button_rects.items():
             context = self.button_contexts.get(name, "global")
-
-            # Context-aware filtering
             if context == "shop" and not self.in_shop:
                 continue
             if context == "inventory" and self.in_shop:
@@ -700,12 +770,26 @@ class MahjongGame(QWidget):
                     handled = True
 
 
+
                 elif name.startswith("inventory_"):
+
                     index = int(name.split("_")[1])
-                    print(f"[CLICK] Inventory slot {index} clicked")
-                    self.selected_inventory_index = index
-                    self.trigger_inventory_item_effect(index)
-                    handled = True
+
+                    # ✅ Right-click opens sell confirmation
+
+                    if event.button() == Qt.RightButton:
+
+                        if index < len(self.inventory) and self.inventory[index]:
+                            self.sell_target_index = index
+
+                            self.show_sell_confirm = True
+
+                            return  # Stop normal click logic
+
+                    # ✅ Left-click — start possible drag or click
+
+                    if event.button() == Qt.LeftButton:
+                        self.trigger_inventory_item_effect(index)
 
                 elif name == "shop_continue":
                     print("[CLICK] shop_continue confirmed")
@@ -717,7 +801,6 @@ class MahjongGame(QWidget):
                     self.reroll_shop()
                     handled = True
 
-
                 elif name == "booster_confirm":
                     if len(self.booster_selected_indices) == 3:
                         selected_names = [self.booster_choices[i] for i in self.booster_selected_indices]
@@ -725,9 +808,8 @@ class MahjongGame(QWidget):
                         self.exit_booster_selector()
                         handled = True
 
-
                 elif name == "booster_skip":
-                    self.selected_booster_tiles = []  # Ensure nothing is added
+                    self.selected_booster_tiles = []
                     self.exit_booster_selector()
                     handled = True
 
@@ -742,13 +824,14 @@ class MahjongGame(QWidget):
                         self.shop_message = "Not enough points!"
                     handled = True
 
-                break  # Found a matching button, stop checking
+                break
 
         if handled:
             return
 
-        # Shop item buttons (outside button_rects)
+        # ---- SHOP ITEM PURCHASE ----
         if self.in_shop:
+            # First: try to purchase a shop item
             for rect, item in getattr(self, "shop_button_rects", []):
                 if rect.collidepoint(x, y):
                     name = item.get("title", "???")
@@ -757,9 +840,21 @@ class MahjongGame(QWidget):
                     self.attempt_purchase(item)
                     return
 
+            # Second: right-click in inventory to sell while in shop
+            for name, rect in self.button_rects.items():
+                if name.startswith("inventory_") and rect.collidepoint(x, y):
+                    index = int(name.split("_")[1])
+                    if event.button() == Qt.RightButton and self.inventory[index]:
+                        self.sell_target_index = index
+                        self.show_sell_confirm = True
+                        return
+
+
+
+        # ---- BOOSTER SELECTOR ----
         elif self.show_booster_selector:
             for i, (rect, item) in enumerate(self.booster_button_rects):
-                if rect.collidepoint(event.pos):
+                if rect.collidepoint((x, y)):
                     if i in self.booster_selected_indices:
                         self.booster_selected_indices.remove(i)
                     elif len(self.booster_selected_indices) < 3:
@@ -776,34 +871,32 @@ class MahjongGame(QWidget):
             elif self.button_rects.get("booster_skip", pygame.Rect(0, 0, 0, 0)).collidepoint(self.last_mouse_pos):
                 self.exit_booster_selector()
 
-        # Check if booster UI is active
+        # ---- BOOSTER UI SELECTION ----
         if self.booster_choices:
             for i, (rect, tile_name) in enumerate(self.booster_button_rects):
                 if rect.collidepoint(self.last_mouse_pos):
                     if i in self.booster_selected_indices:
-                        self.booster_selected_indices.remove(i)  # Unselect
+                        self.booster_selected_indices.remove(i)
                     elif len(self.booster_selected_indices) < 3:
-                        self.booster_selected_indices.add(i) # Select
-                    return  # Stop here if clicked a tile
+                        self.booster_selected_indices.add(i)
+                    return
 
-            # Confirm button
             confirm_rect = self.button_rects.get("booster_confirm")
             if confirm_rect and confirm_rect.collidepoint(self.last_mouse_pos):
                 if len(self.booster_selected_indices) == 3:
                     selected_names = [self.booster_choices[i] for i in self.booster_selected_indices]
-                    self.booster_pool.extend(selected_names * 2)  # Add pairs to pool
-                    self.booster_choices = []  # Close UI
+                    self.booster_pool.extend(selected_names * 2)
+                    self.booster_choices = []
                     self.booster_selected_indices.clear()
                 return
 
-            # Skip button
             skip_rect = self.button_rects.get("booster_skip")
             if skip_rect and skip_rect.collidepoint(self.last_mouse_pos):
-                self.booster_choices = []  # Close UI
+                self.booster_choices = []
                 self.booster_selected_indices.clear()
                 return
 
-
+        # ---- GAME OVER ----
         if self.in_game_over:
             if self.game_over_button_rect.collidepoint(x, y):
                 print("[CLICK] Start New Game from Game Over screen")
@@ -812,8 +905,212 @@ class MahjongGame(QWidget):
                 self.start_new_game()
                 return
 
-        # Tile selection fallback
+        # ---- ACTION BAR INTERCEPT (start drag / right-click sell) ----
+        if hasattr(self, "action_bar_rect") and self.action_bar_rect.collidepoint(x, y):
+            idx = self.hit_test_action_bar_index((x, y))
+            if idx is not None:
+                # Right-click → sell (only in shop)
+                if self.in_shop and event.button() == Qt.RightButton and idx < len(self.inventory) and self.inventory[
+                    idx]:
+                    self.sell_target_index = idx
+                    self.show_sell_confirm = True
+                    self.update_canvas()
+                    return
+
+                # Left-click → begin drag (do NOT let the inventory_* button handler eat it)
+                if event.button() == Qt.LeftButton:
+                    self.dragging_item = True
+
+                    self.dragging_item_idx = index
+
+                    self.drag_start_pos = (event.pos().x(), event.pos().y())
+
+                    self.drag_mouse_pos = self.drag_start_pos
+
+                    self.hover_drop_index = index
+                    return
+
+        # ---- SELL CONFIRMATION OVERLAY ----
+        if self.show_sell_confirm:
+            if self.confirm_button_rect.collidepoint((x, y)):
+                # Sell item
+                item = self.inventory[self.sell_target_index]
+                sell_price = item.get("sell_price", 10)
+                self.wallet += sell_price
+                self.inventory[self.sell_target_index] = None  # Remove item
+                print(f"[SELL] Sold {item.get('title', 'Unknown')} for {sell_price}")
+                self.show_sell_confirm = False
+                self.sell_target_index = None
+                return
+
+            elif self.cancel_button_rect.collidepoint((x, y)):
+                print("[SELL] Cancelled")
+                self.show_sell_confirm = False
+                self.sell_target_index = None
+                return
+
+        # ---- TILE SELECTION ----
         self.handle_click(event)
+
+    def hit_test_action_bar_index(self, pos):
+        x, y = pos
+        # Prefer ActionBar.slot_rects if present
+        slot_rects = getattr(self.action_bar, "slot_rects", None)
+        if slot_rects:
+            for i, rect in enumerate(slot_rects):
+                if rect.collidepoint(x, y):
+                    return i
+            return None
+
+        # Fallback to button_rects mapping
+        for i in range(5):
+            rect = self.button_rects.get(f"inventory_{i}")
+            if rect and rect.collidepoint(x, y):
+                return i
+        return None
+
+    def draw_sell_confirmation(self):
+        """Draws the sell confirmation overlay in PyGame."""
+        if not self.show_sell_confirm or self.sell_target_index is None:
+            return
+
+        # Overlay background
+        overlay_width, overlay_height = 300, 150
+        overlay_x = (self.surface.get_width() - overlay_width) // 2
+        overlay_y = (self.surface.get_height() - overlay_height) // 2
+        pygame.draw.rect(self.surface, (30, 30, 30), (overlay_x, overlay_y, overlay_width, overlay_height))
+        pygame.draw.rect(self.surface, (200, 200, 200), (overlay_x, overlay_y, overlay_width, overlay_height), 2)
+
+        # Text
+        font = self.item_font
+        item_name = self.inventory[self.sell_target_index].get("title", "Unknown")
+        sell_price = self.inventory[self.sell_target_index].get("sell_price", 10)
+
+        title_text = font.render(f"Sell {item_name} for {sell_price}?", True, (255, 255, 255))
+        self.surface.blit(title_text, (overlay_x + 20, overlay_y + 20))
+
+        # Buttons
+        button_w, button_h = 100, 40
+        confirm_x = overlay_x + 30
+        cancel_x = overlay_x + overlay_width - button_w - 30
+        button_y = overlay_y + overlay_height - button_h - 20
+
+        # Store for click detection
+        self.confirm_button_rect = pygame.Rect(confirm_x, button_y, button_w, button_h)
+        self.cancel_button_rect = pygame.Rect(cancel_x, button_y, button_w, button_h)
+
+        pygame.draw.rect(self.surface, (50, 150, 50), self.confirm_button_rect)  # Green confirm
+        pygame.draw.rect(self.surface, (150, 50, 50), self.cancel_button_rect)  # Red cancel
+
+        confirm_text = font.render("Confirm", True, (255, 255, 255))
+        cancel_text = font.render("Cancel", True, (255, 255, 255))
+        self.surface.blit(confirm_text, (confirm_x + 15, button_y + 10))
+        self.surface.blit(cancel_text, (cancel_x + 20, button_y + 10))
+
+    def finalize_sale(self, idx):
+        if idx is None or idx < 0 or idx >= len(self.inventory):
+            return
+        item = self.inventory[idx]
+        if not item:
+            return
+        refund = int(item.get("cost", 0) * 0.5)
+        self.wallet += refund
+        removed = self.inventory.pop(idx)  # ✅ remove, don't set None
+        print(f"[SHOP] Sold '{removed.get('title', '?')}' for {refund}. Wallet: {self.wallet}")
+        # cleanup overlay
+        self.show_sell_confirm = False
+        self.sell_target_index = None
+        # refresh UI
+        self.update_canvas()
+
+    def show_sell_confirmation(self, item_name, refund_amount):
+        w, h = 300, 140
+        screen_w, screen_h = self.surface.get_size()
+        rect_x = (screen_w - w) // 2
+        rect_y = (screen_h - h) // 2
+        self.sell_popup_rect = pygame.Rect(rect_x, rect_y, w, h)
+
+        # Buttons
+        self.confirm_button_rect = pygame.Rect(rect_x + 20, rect_y + 90, 100, 30)
+        self.cancel_button_rect = pygame.Rect(rect_x + 180, rect_y + 90, 100, 30)
+
+        # Draw popup
+        pygame.draw.rect(self.surface, (40, 40, 40), self.sell_popup_rect)
+        pygame.draw.rect(self.surface, (200, 200, 200), self.sell_popup_rect, 2)
+
+        font = pygame.font.SysFont(None, 24)
+        text = font.render(f"Sell {item_name} for {refund_amount}?", True, (255, 255, 255))
+        self.surface.blit(text, (rect_x + 20, rect_y + 20))
+
+        pygame.draw.rect(self.surface, (0, 200, 0), self.confirm_button_rect)
+        self.surface.blit(font.render("Confirm", True, (0, 0, 0)),
+                          (self.confirm_button_rect.x + 10, self.confirm_button_rect.y + 5))
+
+        pygame.draw.rect(self.surface, (200, 0, 0), self.cancel_button_rect)
+        self.surface.blit(font.render("Cancel", True, (0, 0, 0)),
+                          (self.cancel_button_rect.x + 25, self.cancel_button_rect.y + 5))
+
+        pygame.display.flip()
+
+    def is_in_action_bar(self, pos):
+        return self.action_bar_rect.collidepoint(pos)
+
+    def mouseMoveEvent(self, event):
+        if self.dragging_item:
+            self.drag_mouse_pos = (event.pos().x(), event.pos().y())
+            dx = abs(self.drag_mouse_pos[0] - self.drag_start_pos[0])
+            dy = abs(self.drag_mouse_pos[1] - self.drag_start_pos[1])
+            if dx > 5 or dy > 5:  # drag threshold in pixels
+                self.is_dragging_inventory = True
+                self.hover_drop_index = self.hit_test_action_bar_index(self.drag_mouse_pos)
+            self.update_canvas()
+
+        # Keep any existing mouse move logic (music slider etc.)
+        self.handle_mouse_motion(event)
+
+    def mouseReleaseEvent(self, event):
+        # Was dragging inventory?
+        if self.dragging_item:
+            if self.is_dragging_inventory:
+                # Perform reorder
+                src = self.dragging_item_idx
+                dst = self.hit_test_action_bar_index((event.pos().x(), event.pos().y()))
+                if dst is not None and src is not None and dst != src:
+                    item = self.inventory.pop(src)
+                    dst = min(dst, len(self.inventory))
+                    self.inventory.insert(dst, item)
+                    print(f"[INV] Reordered {src} → {dst}")
+            else:
+                # Short click → trigger item effect
+                index = self.dragging_item_idx
+                if index < len(self.inventory):
+                    print(f"[CLICK] Inventory slot {index} clicked")
+                    self.selected_inventory_index = index
+                    self.trigger_inventory_item_effect(index)
+
+        # Reset drag state
+        self.dragging_item = False
+        self.is_dragging_inventory = False
+        self.dragging_item_idx = None
+        self.drag_start_pos = None
+        self.drag_mouse_pos = None
+        self.hover_drop_index = None
+
+        # Keep any existing mouse release logic
+        self.handle_mouse_up(event)
+
+    def try_sell_inventory_item(self, idx):
+        if not getattr(self, "in_shop", False):
+            print("[SHOP] Not in shop; cannot sell.")
+            return
+        if idx is None or idx < 0 or idx >= len(self.inventory):
+            return
+        item = self.inventory[idx]
+        sell_price = max(0, int(item.get("cost", 0) * 0.5))
+        self.wallet += sell_price
+        removed = self.inventory.pop(idx)
+        print(f"[SHOP] Sold '{removed.get('title', '?')}' for {sell_price}. Wallet: {self.wallet}")
+        self.update_canvas()
 
     def get_random_booster_tiles(self, count):
         try:
@@ -971,13 +1268,8 @@ class MahjongGame(QWidget):
 
     def handle_mouse_up(self, event):
         self.dragging_volume = False
-
-    def mouseReleaseEvent(self, event):
-        self.handle_mouse_up(event)
-
-        self.dragging_volume_slider = False
-
-
+        # NEW: finish inventory drag (reorder or click)
+        self.handle_inventory_drag_end(event)
 
     def handle_mouse_motion(self, event):
         if self.dragging_volume:
@@ -986,6 +1278,9 @@ class MahjongGame(QWidget):
             relative_x = min(max(x - slider_rect.x, 0), slider_rect.width)
             self.music_volume = relative_x / slider_rect.width
             self.music_manager.set_volume(self.music_volume)
+
+        # NEW: inventory drag ghost update
+        self.handle_inventory_drag_motion(event)
 
     def update_volume_from_mouse(self, mouse_x):
         rect = self.button_rects.get("volume_slider")
@@ -997,6 +1292,64 @@ class MahjongGame(QWidget):
         print(f"[VOLUME] Adjusted to {self.music_volume:.2f}")
         self.update()
 
+    def handle_inventory_drag_start(self, idx, x, y):
+        """Begin a potential drag from inventory slot idx."""
+        if idx is None or idx >= len(self.inventory):
+            return
+        # Start drag candidate
+        self.dragging_item = True
+        self.dragging_item_idx = idx
+        self.drag_start_pos = (x, y)
+        self.drag_mouse_pos = (x, y)
+        self.hover_drop_index = idx
+        # Don’t trigger the item yet; decide on mouse up
+        # UI refresh to show ghost highlight
+        self.update_canvas()
+
+    def handle_inventory_drag_motion(self, event):
+        """Update drag position and hovered drop slot."""
+        if not self.dragging_item:
+            return
+        self.drag_mouse_pos = (event.pos().x(), event.pos().y())
+        self.hover_drop_index = self.hit_test_action_bar_index(self.drag_mouse_pos)
+        self.update_canvas()
+
+    def handle_inventory_drag_end(self, event):
+        """Finish drag: reorder if moved enough, else treat as click/use."""
+        if not self.dragging_item:
+            return
+
+        end_pos = (event.pos().x(), event.pos().y())
+        sx, sy = self.drag_start_pos
+        dx, dy = end_pos[0] - sx, end_pos[1] - sy
+        moved_far = (dx * dx + dy * dy) ** 0.5 >= self.click_activation_threshold
+
+        src = self.dragging_item_idx
+        dst = self.hit_test_action_bar_index(end_pos)
+
+        # Reset drag visuals/state first
+        self.dragging_item = False
+        self.dragging_item_idx = None
+        self.drag_start_pos = None
+        self.drag_mouse_pos = None
+        self.hover_drop_index = None
+
+        # If it’s a real drag and valid destination, reorder
+        if moved_far and dst is not None and src is not None and src < len(self.inventory):
+            item = self.inventory.pop(src)
+            dst = min(dst, len(self.inventory))  # clamp
+            self.inventory.insert(dst, item)
+            print(f"[INV] Reordered '{item.get('title', '?')}' {src} → {dst}")
+            self.update_canvas()
+            return
+
+        # Otherwise treat as a click/use (left mouse only)
+        if not moved_far and dst is not None and dst < len(self.inventory):
+            # only trigger if it was a left button release
+            if hasattr(event, "button") and event.button() == Qt.LeftButton:
+                print(f"[CLICK] Inventory slot {dst} clicked")
+                self.selected_inventory_index = dst
+                self.trigger_inventory_item_effect(dst)
 
     def get_possible_match_count(self):
         if len(self.board) == 0:
@@ -1076,6 +1429,7 @@ class MahjongGame(QWidget):
                     # Remove Chupacabra from inventory
                     self.inventory.remove(item)
                     # self.display_message("Chupacabra was consumed — insufficient funds.")
+
 
 
     def start_new_round(self):
@@ -1476,11 +1830,6 @@ class MahjongGame(QWidget):
 
         self.hovered_inventory_index = None
 
-    def mouseMoveEvent(self, event):
-        # print(f"[MOUSE MOVE] {datetime.datetime.now()}")
-        self.last_mouse_pos = (event.pos().x(), event.pos().y())
-        # self.update_hover_state()  # ✅ Trigger hover check immediately
-        # self.update()  # ✅ Repaint if hover card changes
 
     def calculate_top_tiles(self):
         self.top_tiles = set()
@@ -1511,7 +1860,9 @@ class MahjongGame(QWidget):
         self.draw_particles()
         self.update_hover_state()
         self.draw_overlays()
+        self.draw_sell_confirmation()
         self.item_card.draw(self.surface)
+        self.update_game_state()
         self.blit_to_qt()
 
     def draw_top_static_tiles(self):
@@ -1801,6 +2152,8 @@ class MahjongGame(QWidget):
         if moves > 0:
             return
 
+        self.resolve_wendigo_end_of_round()
+
         # No more moves, evaluate result
         round_success = self.score >= self.target_score
 
@@ -1967,21 +2320,33 @@ class MahjongGame(QWidget):
         return modifiers
 
     def empty_score(self):
-        excess_score = max(0, self.score - self.target_score)
+        # Clean up any accidental None entries (defensive)
+        self.inventory = [it for it in self.inventory if it is not None]
 
-        print(f"excess score before {excess_score}")
+        excess_score = max(0, self.score - self.target_score)
+        print(f"[WALLET] Excess score before modifiers: {excess_score}")
+
+        wallet_gain = excess_score
 
         for item in self.inventory:
-            if item['title'] == "Golem":
-                penalty = item['effects']['score_multiplier']
-                excess_score = int(excess_score * penalty)
-            if item['title'] == "Leprechaun":
-                excess_score = int(excess_score * 2)
+            title = (item or {}).get("title", "")
+            effects = (item or {}).get("effects", {}) or {}
 
-        else:
-            wallet_gain = excess_score
+            if title == "Golem":
+                # Reduce leftover score added to wallet by N%
+                pct = effects.get("wallet_penalty_percent", 0)
+                factor = max(0.0, 1.0 - (pct / 100.0))
+                old = wallet_gain
+                wallet_gain = int(wallet_gain * factor)
+                print(f"[WALLET] Golem penalty {pct}%: {old} -> {wallet_gain}")
+
+            elif title == "Leprechaun":
+                old = wallet_gain
+                wallet_gain = int(wallet_gain * 2)
+                print(f"[WALLET] Leprechaun double: {old} -> {wallet_gain}")
 
         self.wallet += wallet_gain
+        print(f"[WALLET] Added {wallet_gain} to wallet. New wallet: {self.wallet}")
 
     def enter_shop_screen(self):
         print("[SHOP] Entering shop screen...")
@@ -2049,7 +2414,8 @@ class MahjongGame(QWidget):
 
                 # Load and blit image (even for placeholders if image exists)
                 if img_path:
-                    full_path = os.path.normpath(os.path.join(BASE_DIR, img_path))
+                    # full_path = os.path.normpath(os.path.join(BASE_DIR, img_path))
+                    full_path = resource_path(*img_path.split(os.sep))
                     if os.path.exists(full_path):
                         icon = pygame.image.load(full_path).convert_alpha()
                         icon = pygame.transform.scale(icon, (TILE_WIDTH, TILE_HEIGHT))
@@ -2914,6 +3280,18 @@ class MahjongGame(QWidget):
             return self.selected_tiles[0]
         return None
 
+    def get_item_by_id(self, uid):
+        for it in self.inventory:
+            if it.get("unique_id") == uid:
+                return it
+        return None
+
+    def find_item_index(self, uid):
+        for i, it in enumerate(self.inventory):
+            if it.get("unique_id") == uid:
+                return i
+        return None
+
     def is_top_of_stack(self, tile):
         gx, gy, z = tile["grid_x"], tile["grid_y"], tile["z"]
         return not any(
@@ -3091,7 +3469,7 @@ class MahjongGame(QWidget):
                 self.inventory.remove(item)
 
     def dullahan_drop(self, item):
-        if item["charge"] <= 0:
+        if item["charges"] <= 0:
             print("[DULLAHAN] No charges left.")
             return
         if item.get("cooldown", 0) > 0:
@@ -3156,9 +3534,9 @@ class MahjongGame(QWidget):
                         f"[DEBUG] Marked exposed: {top_below['name']} at ({top_below['grid_x']},{top_below['grid_y']},{top_below['z']})")
 
         # Deduct and check for depletion
-        item["charge"] -= 1
+        item["charges"] -= 1
         item["cooldown"] = item.get("cooldown_match", 15)
-        if item["charge"] <= 0:
+        if item["charges"] <= 0:
             print("[DULLAHAN] Charges depleted. Removing item.")
             if item in self.inventory:
                 self.inventory.remove(item)
@@ -3289,6 +3667,50 @@ class MahjongGame(QWidget):
             print("[ARACHNE] Charges depleted. Removing item.")
             if item in self.inventory:
                 self.inventory.remove(item)
+
+    def apply_wendigo_start_of_round(self):
+        w = self.get_item_by_id("wendigo")
+        if not w:
+            return
+
+        # 1) remove a charge at start of round
+        if w["charges"] > 0:
+            w["charges"] -= 1
+            if w["charges"] == 0:
+                print("[WENDIGO] Out of charges (can still persist for effects).")
+
+        # 2) halve cooldowns + charges of OTHER items (round down, min 0/1 sensibly)
+        for it in list(self.inventory):
+            if it is w:
+                continue
+            if "cooldown" in it and it["cooldown"] > 0:
+                it["cooldown"] = max(0, it["cooldown"] // 2)
+            if "charges" in it:
+                # halve current charges, but don't kill the item if it had 1
+                new_charge = max(1, it["charges"] // 2)
+                if new_charge != it["charge"]:
+                    print(f"[WENDIGO] Halved charges for {it.get('title')}: {it['charges']} -> {new_charge}")
+                    it["charges"] = new_charge
+
+    def resolve_wendigo_end_of_round(self):
+        if not self.inventory:
+            return
+
+        idx = self.find_item_index("wendigo")
+        if idx is None:
+            return
+
+        right_idx = idx + 1
+        if right_idx < len(self.inventory):
+            eaten = self.inventory.pop(right_idx)
+            print(f"[WENDIGO] Devoured '{eaten.get('title', '?')}' at end of round.")
+            w = self.get_item_by_id("wendigo")
+            if w:
+                w["charges"] = w.get("charges", 0) + 1
+                print(f"[WENDIGO] Charge increased to {w['charges']}.")
+            # optional: sfx/particles
+        else:
+            print("[WENDIGO] No item to the right; nothing devoured.")
 
     def tick_item_cooldowns(self):
         for item in self.inventory:
