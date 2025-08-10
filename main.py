@@ -92,15 +92,21 @@ WIDTH = 1000
 HEIGHT = 1000
 
 
+
+
 tile_particle_map = {
     "death": SmokeParticle,
     "fool": SparkleParticle,
     "sun": FireParticle,
     "moon": SparkleParticle,
-    "devil": FireParticle,
+    "thedevil": FireParticle,
 }
 
 class MahjongGame(QWidget):
+    USE_PIXEL_COORDS = False  # <- change to True if x,y are pixels
+    cell_w = 1  # <- if pixels: width of one grid cell in pixels
+    cell_h = 1  # <- if pixels: height of one grid cell in pixels
+
     def __init__(self):
         super().__init__()
         try:
@@ -705,47 +711,118 @@ class MahjongGame(QWidget):
         self._vacated_during_animation = set()
 
     def mousePressEvent(self, event):
-        x = event.pos().x()
-        y = event.pos().y()
+        """
+        Central mouse handler.
+        - Normalizes click coords
+        - Short-circuits on modal overlays (sell confirm)
+        - Delegates the rest to focused handlers (buttons, shop, boosters, game over, action bar, tiles)
+        """
+        x, y = event.pos().x(), event.pos().y()
         self.last_mouse_pos = (x, y)
 
-        # --- SELL CONFIRMATION OVERLAY: handle it FIRST so clicks go to the modal ---
-        if getattr(self, "show_sell_confirm", False):
-            # Use (x,y) not QPoint for collidepoint
-            if self.confirm_button_rect.collidepoint(x, y):
-                idx = self.sell_target_index
-                if idx is not None and 0 <= idx < len(self.inventory):
-                    item = self.inventory[idx]
-                    if item:
-                        sell_price = int(item.get("cost", 0) * 0.5)
-                        self.wallet += sell_price
-                        removed = self.inventory.pop(idx)  # REMOVE, don't set None
-                        print(f"[SELL] Sold '{removed.get('title', '?')}' for {sell_price}. Wallet: {self.wallet}")
-                self.show_sell_confirm = False
-                self.sell_target_index = None
-                self.update_canvas()
+        # 1) Modal overlay always gets first dibs
+        if self._handle_sell_confirm_modal_click(x, y):
+            return
+
+        # 2) Optional debug marker
+        self._debug_click_marker(x, y)
+
+        # 3) Global UI buttons (music, sliders, shop buttons, booster buttons, etc.)
+        if self._handle_global_buttons(event, x, y):
+            return
+
+        # 4) Shop UI: buying and inventory selling (right-click)
+        if self.in_shop:
+            if self._handle_shop_clicks(event, x, y):
                 return
+        else:
+            # 5) Booster selector UI (when the 5-tile picker overlay is showing)
+            if self.show_booster_selector:
+                if self._handle_booster_selector_clicks(x, y):
+                    return
 
-            if self.cancel_button_rect.collidepoint(x, y):
-                print("[SELL] Cancelled")
-                self.show_sell_confirm = False
-                self.sell_target_index = None
-                self.update_canvas()
-                return
+            # 6) Booster mini-UI confirm/skip (when choices exist but overlay not active)
+            if self.booster_choices:
+                if self._handle_booster_inline_clicks(x, y):
+                    return
 
-            # Optional: click outside modal cancels
-            if not self.sell_popup_rect.collidepoint(x, y):
-                self.show_sell_confirm = False
-                self.sell_target_index = None
-                self.update_canvas()
-                return
+        # 7) Game-over overlay (New Game)
+        if self._handle_game_over_clicks(x, y):
+            return
 
-        # Debug visual
-        pygame.draw.circle(self.surface, (255, 0, 0), (x, y), 5)
+        # 8) Action bar interactions (drag start, right-click sell in shop)
+        if self._handle_action_bar_clicks(event, x, y):
+            return
 
+        # 9) Fallback: tile selection in the board area
+        self.handle_click(event)
+
+    # -----------------------------
+    # Helpers (single-responsibility)
+    # -----------------------------
+
+    def _handle_sell_confirm_modal_click(self, x, y):
+        """
+        SELL CONFIRMATION MODAL:
+        - Only active when self.show_sell_confirm is True
+        - Blocks clicks to anything underneath while active
+        - Confirm: remove item from inventory, credit wallet
+        - Cancel: close overlay
+        - Click outside modal: cancel (optional behavior preserved)
+        """
+        if not getattr(self, "show_sell_confirm", False):
+            return False
+
+        # Confirm
+        if self.confirm_button_rect.collidepoint(x, y):
+            idx = self.sell_target_index
+            if idx is not None and 0 <= idx < len(self.inventory):
+                item = self.inventory[idx]
+                if item:
+                    sell_price = int(item.get("cost", 0) * 0.5)
+                    self.wallet += sell_price
+                    removed = self.inventory.pop(idx)
+                    print(f"[SELL] Sold '{removed.get('title', '?')}' for {sell_price}. Wallet: {self.wallet}")
+            self.show_sell_confirm = False
+            self.sell_target_index = None
+            self.update_canvas()
+            return True
+
+        # Cancel
+        if self.cancel_button_rect.collidepoint(x, y):
+            print("[SELL] Cancelled")
+            self.show_sell_confirm = False
+            self.sell_target_index = None
+            self.update_canvas()
+            return True
+
+        # Optional: click outside modal cancels
+        if not self.sell_popup_rect.collidepoint(x, y):
+            self.show_sell_confirm = False
+            self.sell_target_index = None
+            self.update_canvas()
+            return True
+
+        # Clicked inside the modal but not on buttons → eat click
+        return True
+
+    def _debug_click_marker(self, x, y):
+        """Small red dot to visualize clicks during debugging."""
+        try:
+            pygame.draw.circle(self.surface, (255, 0, 0), (x, y), 5)
+        except Exception:
+            pass
+
+    def _handle_global_buttons(self, event, x, y):
+        """
+        TOP-LEVEL BUTTONS:
+        - Respects button context ("shop" vs "inventory" vs global)
+        - Music prev/next, volume slider
+        - Inventory *_ buttons (left: activate, right: open sell confirm)
+        - Shop controls (continue, reroll, booster purchase)
+        - Booster overlay controls (confirm/skip) when rendered as buttons
+        """
         handled = False
-
-        # ---- BUTTONS ----
         for name, rect in self.button_rects.items():
             context = self.button_contexts.get(name, "global")
             if context == "shop" and not self.in_shop:
@@ -769,27 +846,20 @@ class MahjongGame(QWidget):
                     self.update_volume_from_mouse(x)
                     handled = True
 
-
-
                 elif name.startswith("inventory_"):
-
                     index = int(name.split("_")[1])
 
-                    # ✅ Right-click opens sell confirmation
-
+                    # Right-click → open sell confirm (when item exists)
                     if event.button() == Qt.RightButton:
-
                         if index < len(self.inventory) and self.inventory[index]:
                             self.sell_target_index = index
-
                             self.show_sell_confirm = True
+                            return True  # modal takes over
 
-                            return  # Stop normal click logic
-
-                    # ✅ Left-click — start possible drag or click
-
+                    # Left-click → trigger item effect (existing behavior)
                     if event.button() == Qt.LeftButton:
                         self.trigger_inventory_item_effect(index)
+                        handled = True
 
                 elif name == "shop_continue":
                     print("[CLICK] shop_continue confirmed")
@@ -802,6 +872,7 @@ class MahjongGame(QWidget):
                     handled = True
 
                 elif name == "booster_confirm":
+                    # Applies when booster overlay uses a confirm button in button_rects
                     if len(self.booster_selected_indices) == 3:
                         selected_names = [self.booster_choices[i] for i in self.booster_selected_indices]
                         self.booster_history.extend(selected_names)
@@ -826,131 +897,138 @@ class MahjongGame(QWidget):
 
                 break
 
-        if handled:
-            return
+        return handled
 
-        # ---- SHOP ITEM PURCHASE ----
-        if self.in_shop:
-            # First: try to purchase a shop item
-            for rect, item in getattr(self, "shop_button_rects", []):
-                if rect.collidepoint(x, y):
-                    name = item.get("title", "???")
-                    cost = item.get("cost", 999)
-                    print(f"[CLICK] Attempting to buy {name} for {cost}")
-                    self.attempt_purchase(item)
-                    return
+    def _handle_shop_clicks(self, event, x, y):
+        """
+        SHOP INTERACTIONS:
+        - Buying items from the shop
+        - Right-click selling from inventory slots while shop is open
+        """
+        # Try purchasing a shop item
+        for rect, item in getattr(self, "shop_button_rects", []):
+            if rect.collidepoint(x, y):
+                name = item.get("title", "???")
+                cost = item.get("cost", 999)
+                print(f"[CLICK] Attempting to buy {name} for {cost}")
+                self.attempt_purchase(item)
+                return True
 
-            # Second: right-click in inventory to sell while in shop
-            for name, rect in self.button_rects.items():
-                if name.startswith("inventory_") and rect.collidepoint(x, y):
-                    index = int(name.split("_")[1])
-                    if event.button() == Qt.RightButton and self.inventory[index]:
-                        self.sell_target_index = index
-                        self.show_sell_confirm = True
-                        return
+        # Right-click in inventory to sell while in shop
+        for name, rect in self.button_rects.items():
+            if name.startswith("inventory_") and rect.collidepoint(x, y):
+                index = int(name.split("_")[1])
+                if event.button() == Qt.RightButton and index < len(self.inventory) and self.inventory[index]:
+                    self.sell_target_index = index
+                    self.show_sell_confirm = True
+                    return True
 
+        return False
 
+    def _handle_booster_selector_clicks(self, x, y):
+        """
+        BOOSTER SELECTOR OVERLAY (5 choices, pick up to 3):
+        - Toggle selection by clicking tiles
+        - Confirm/Skip via the overlay's own buttons (handled in _handle_global_buttons)
+        """
+        for i, (rect, _item) in enumerate(self.booster_button_rects):
+            if rect.collidepoint((x, y)):
+                if i in self.booster_selected_indices:
+                    self.booster_selected_indices.remove(i)
+                elif len(self.booster_selected_indices) < 3:
+                    self.booster_selected_indices.add(i)
+                self.update()
+                return True
 
-        # ---- BOOSTER SELECTOR ----
-        elif self.show_booster_selector:
-            for i, (rect, item) in enumerate(self.booster_button_rects):
-                if rect.collidepoint((x, y)):
-                    if i in self.booster_selected_indices:
-                        self.booster_selected_indices.remove(i)
-                    elif len(self.booster_selected_indices) < 3:
-                        self.booster_selected_indices.add(i)
-                    self.update()
-                    return
-
-            if self.button_rects.get("booster_confirm", pygame.Rect(0, 0, 0, 0)).collidepoint(self.last_mouse_pos):
-                if len(self.booster_selected_indices) == 3:
-                    for idx in self.booster_selected_indices:
-                        self.tile_pool.append(self.booster_choices[idx])
-                    self.exit_booster_selector()
-
-            elif self.button_rects.get("booster_skip", pygame.Rect(0, 0, 0, 0)).collidepoint(self.last_mouse_pos):
+        # Also allow confirm/skip via the rectangular areas if present (defensive)
+        confirm_rect = self.button_rects.get("booster_confirm", pygame.Rect(0, 0, 0, 0))
+        if confirm_rect.collidepoint(self.last_mouse_pos):
+            if len(self.booster_selected_indices) == 3:
+                for idx in self.booster_selected_indices:
+                    self.tile_pool.append(self.booster_choices[idx])
                 self.exit_booster_selector()
+            return True
 
-        # ---- BOOSTER UI SELECTION ----
-        if self.booster_choices:
-            for i, (rect, tile_name) in enumerate(self.booster_button_rects):
-                if rect.collidepoint(self.last_mouse_pos):
-                    if i in self.booster_selected_indices:
-                        self.booster_selected_indices.remove(i)
-                    elif len(self.booster_selected_indices) < 3:
-                        self.booster_selected_indices.add(i)
-                    return
+        skip_rect = self.button_rects.get("booster_skip", pygame.Rect(0, 0, 0, 0))
+        if skip_rect.collidepoint(self.last_mouse_pos):
+            self.exit_booster_selector()
+            return True
 
-            confirm_rect = self.button_rects.get("booster_confirm")
-            if confirm_rect and confirm_rect.collidepoint(self.last_mouse_pos):
-                if len(self.booster_selected_indices) == 3:
-                    selected_names = [self.booster_choices[i] for i in self.booster_selected_indices]
-                    self.booster_pool.extend(selected_names * 2)
-                    self.booster_choices = []
-                    self.booster_selected_indices.clear()
-                return
+        return False
 
-            skip_rect = self.button_rects.get("booster_skip")
-            if skip_rect and skip_rect.collidepoint(self.last_mouse_pos):
+    def _handle_booster_inline_clicks(self, x, y):
+        """
+        INLINE BOOSTER UI (no full overlay; choices exist + small confirm/skip):
+        - Toggle up to 3 selections
+        - Confirm adds 2x of each choice into booster_pool (as in original code)
+        - Skip clears selection
+        """
+        for i, (rect, _tile_name) in enumerate(self.booster_button_rects):
+            if rect.collidepoint(self.last_mouse_pos):
+                if i in self.booster_selected_indices:
+                    self.booster_selected_indices.remove(i)
+                elif len(self.booster_selected_indices) < 3:
+                    self.booster_selected_indices.add(i)
+                return True
+
+        confirm_rect = self.button_rects.get("booster_confirm")
+        if confirm_rect and confirm_rect.collidepoint(self.last_mouse_pos):
+            if len(self.booster_selected_indices) == 3:
+                selected_names = [self.booster_choices[i] for i in self.booster_selected_indices]
+                self.booster_pool.extend(selected_names * 2)
                 self.booster_choices = []
                 self.booster_selected_indices.clear()
-                return
+            return True
 
-        # ---- GAME OVER ----
-        if self.in_game_over:
-            if self.game_over_button_rect.collidepoint(x, y):
-                print("[CLICK] Start New Game from Game Over screen")
-                self.in_game_over = False
-                self.reset_game_state()
-                self.start_new_game()
-                return
+        skip_rect = self.button_rects.get("booster_skip")
+        if skip_rect and skip_rect.collidepoint(self.last_mouse_pos):
+            self.booster_choices = []
+            self.booster_selected_indices.clear()
+            return True
 
-        # ---- ACTION BAR INTERCEPT (start drag / right-click sell) ----
+        return False
+
+    def _handle_game_over_clicks(self, x, y):
+        """
+        GAME OVER OVERLAY:
+        - Clicking the 'New Game' / 'Start Over' button resets and starts anew.
+        """
+        if getattr(self, "in_game_over", False) and self.game_over_button_rect.collidepoint(x, y):
+            print("[CLICK] Start New Game from Game Over screen")
+            self.in_game_over = False
+            self.reset_game_state()
+            self.start_new_game()
+            return True
+        return False
+
+    def _handle_action_bar_clicks(self, event, x, y):
+        """
+        ACTION BAR:
+        - Right-click to sell (only in shop)
+        - Left-click begins drag of an inventory item from the action bar
+        """
         if hasattr(self, "action_bar_rect") and self.action_bar_rect.collidepoint(x, y):
             idx = self.hit_test_action_bar_index((x, y))
-            if idx is not None:
-                # Right-click → sell (only in shop)
-                if self.in_shop and event.button() == Qt.RightButton and idx < len(self.inventory) and self.inventory[
-                    idx]:
-                    self.sell_target_index = idx
-                    self.show_sell_confirm = True
-                    self.update_canvas()
-                    return
+            if idx is None:
+                return False
 
-                # Left-click → begin drag (do NOT let the inventory_* button handler eat it)
-                if event.button() == Qt.LeftButton:
-                    self.dragging_item = True
+            # Right-click → sell (only in shop)
+            if self.in_shop and event.button() == Qt.RightButton and idx < len(self.inventory) and self.inventory[idx]:
+                self.sell_target_index = idx
+                self.show_sell_confirm = True
+                self.update_canvas()
+                return True
 
-                    self.dragging_item_idx = index
+            # Left-click → begin drag
+            if event.button() == Qt.LeftButton:
+                self.dragging_item = True
+                self.dragging_item_idx = idx  # ← use idx, not an undefined 'index'
+                self.drag_start_pos = (event.pos().x(), event.pos().y())
+                self.drag_mouse_pos = self.drag_start_pos
+                self.hover_drop_index = idx
+                return True
 
-                    self.drag_start_pos = (event.pos().x(), event.pos().y())
-
-                    self.drag_mouse_pos = self.drag_start_pos
-
-                    self.hover_drop_index = index
-                    return
-
-        # ---- SELL CONFIRMATION OVERLAY ----
-        if self.show_sell_confirm:
-            if self.confirm_button_rect.collidepoint((x, y)):
-                # Sell item
-                item = self.inventory[self.sell_target_index]
-                sell_price = item.get("sell_price", 10)
-                self.wallet += sell_price
-                self.inventory[self.sell_target_index] = None  # Remove item
-                print(f"[SELL] Sold {item.get('title', 'Unknown')} for {sell_price}")
-                self.show_sell_confirm = False
-                self.sell_target_index = None
-                return
-
-            elif self.cancel_button_rect.collidepoint((x, y)):
-                print("[SELL] Cancelled")
-                self.show_sell_confirm = False
-                self.sell_target_index = None
-                return
-
-        # ---- TILE SELECTION ----
-        self.handle_click(event)
+        return False
 
     def hit_test_action_bar_index(self, pos):
         x, y = pos
@@ -984,7 +1062,7 @@ class MahjongGame(QWidget):
         # Text
         font = self.item_font
         item_name = self.inventory[self.sell_target_index].get("title", "Unknown")
-        sell_price = self.inventory[self.sell_target_index].get("sell_price", 10)
+        sell_price = int(self.inventory[self.sell_target_index].get("cost", 10) * 0.5)
 
         title_text = font.render(f"Sell {item_name} for {sell_price}?", True, (255, 255, 255))
         self.surface.blit(title_text, (overlay_x + 20, overlay_y + 20))
@@ -1262,6 +1340,8 @@ class MahjongGame(QWidget):
             self.arachne_swap(item)
         elif effect_type == "djinn_wish":
             self.djinn_wish(item)
+        elif effect_type == "oni_sink":
+            self.use_oni(item)
 
         else:
             print(f"[EFFECT] No defined logic for effect: {effect_type}")
@@ -3293,11 +3373,194 @@ class MahjongGame(QWidget):
         return None
 
     def is_top_of_stack(self, tile):
-        gx, gy, z = tile["grid_x"], tile["grid_y"], tile["z"]
+        gx, gy, z = tile.get("grid_x", tile["x"]), tile.get("grid_y", tile["y"]), tile.get("z", 0)
         return not any(
             t for t in self.board
-            if t["grid_x"] == gx and t["grid_y"] == gy and t["z"] > z
+            if t.get("grid_x", t["x"]) == gx and t.get("grid_y", t["y"]) == gy and t.get("z", 0) > z
         )
+
+    def _is_exposed(self, tile) -> bool:
+        """
+        Exposed for Oni = not covered (no tile above in the SAME STACK KEY).
+        This prevents moving Devils that are visually under another tile.
+        """
+        key = self._stack_key(tile)
+        z = tile.get("z", 0)
+        return not any(self._stack_key(t) == key and t.get("z", 0) > z for t in self.board)
+
+    def _debug_report_devil_positions(self, label=""):
+        DEVIL_KEY = "the devil"
+        devils = self._get_type_tiles(DEVIL_KEY)
+
+        def stack_stats(t):
+            stack = sorted([s for s in self.board if s["x"] == t["x"] and s["y"] == t["y"]],
+                           key=lambda s: s.get("z", 0))
+            topz = stack[-1].get("z", 0) if stack else 0
+            return (t.get("z", 0), topz, self._is_exposed(t), len(stack))
+
+        snap = [((*stack_stats(t),), (t.get("tarot"), t.get("name"), t["x"], t["y"])) for t in devils]
+        # Print first few for brevity:
+        preview = [
+            f"(z={z}, top={top}, exp={exp}, stack={cnt}) tarot={tarot} name={name} @({x},{y})"
+            for ((z, top, exp, cnt), (tarot, name, x, y)) in snap[:10]
+        ]
+        print(f"[ONI/DEBUG] Devils ({label}): {len(devils)}")
+        for line in preview:
+            print("  ", line)
+        # Quick count of devils that remain top:
+        remain_top = sum(1 for ((z, top, exp, cnt), _) in snap if z == top)
+        if remain_top:
+            print(f"[ONI/DEBUG] Devils currently at TOP of their stacks: {remain_top}")
+
+    def _is_tile_type(self, tile, t_type: str) -> bool:
+        want = self._norm_type_key(t_type)  # 'the devil' → 'devil', 'devil' → 'devil'
+        tarot = self._norm_type_key(tile.get("tarot", ""))
+        name = self._norm_type_key(tile.get("name", ""))
+        return tarot == want or name == want
+
+    def _coords(self, t):
+        # use grid_* if present, else fall back to pixel coords
+        gx = t.get("grid_x", t["x"])
+        gy = t.get("grid_y", t["y"])
+        gz = t.get("z", 0)
+        return gx, gy, gz
+
+    def get_draw_pos(self, tile):
+        """
+        Convert logical (stack key + z) to pixel draw position.
+        Keep all logic based on keys/z; keep all visuals here.
+        """
+        gx, gy = self._stack_key(tile)
+        # Base cell origin in pixels
+        base_x = gx * self.cell_w if self.USE_PIXEL_COORDS else gx * self.TILE_WIDTH
+        base_y = gy * self.cell_h if self.USE_PIXEL_COORDS else gy * self.TILE_HEIGHT
+
+        # Visual stack offsets (example: slight x/y shift per z for depth)
+        z = tile.get("z", 0)
+        draw_x = self.board_origin_x + base_x + z * getattr(self, "stack_dx", 0)
+        draw_y = self.board_origin_y + base_y - z * getattr(self, "stack_dy", 0)
+
+        # If you have per-tile animation offsets, add here (dx/dy), not to logic
+        draw_x += tile.get("dx", 0)
+        draw_y += tile.get("dy", 0)
+        return draw_x, draw_y
+
+
+    def _get_type_tiles(self, t_type: str):
+        want = self._norm_type_key(t_type)
+        return [t for t in self.board
+                if self._norm_type_key(t.get("tarot", "")) == want
+                or self._norm_type_key(t.get("name", "")) == want]
+
+    def _norm_type_key(self, s: str) -> str:
+        s = (s or "").lower()
+        # remove non-alnum, and drop a leading 'the'
+        alnum = "".join(ch for ch in s if ch.isalnum())
+        if alnum.startswith("the") and len(alnum) > 3:
+            alnum = alnum[3:]
+        return alnum
+
+    def _normalize_stack_z(self, gx, gy):
+        stack = sorted(self._stack_tiles_at(gx, gy), key=lambda t: t.get("z", 0))
+        for i, t in enumerate(stack):
+            t["z"] = i
+
+    def _stack_tiles_at(self, x, y):
+        """All tiles at (x,y)."""
+        return [t for t in self.board if t["x"] == x and t["y"] == y]
+
+    def _set_stack_order(self, x, y, tiles_bottom_to_top):
+        """Write z=0..n for this (x,y) stack according to the given order."""
+        for i, t in enumerate(tiles_bottom_to_top):
+            t["x"], t["y"], t["z"] = x, y, i
+
+    def _stack_key_from_xy(self, x, y):
+        """
+        Map any (x,y) to an integer stack key (gx, gy), so tiny pixel offsets
+        or subpixel animations won't make a separate 'stack'.
+        """
+        if self.USE_PIXEL_COORDS:
+            gx = int(round(x / self.cell_w))
+            gy = int(round(y / self.cell_h))
+        else:
+            gx = int(round(x))
+            gy = int(round(y))
+        return (gx, gy)
+
+    def _stack_key(self, tile):
+        return self._stack_key_from_xy(tile["x"], tile["y"])
+
+    def _tiles_in_stack(self, key):
+        """All tiles that share the same stack (by key), sorted bottom→top."""
+        gx, gy = key
+
+        def key_of(t): return self._stack_key(t) == (gx, gy)
+
+        return sorted([t for t in self.board if key_of(t)], key=lambda t: t.get("z", 0))
+
+    def _reindex_stack(self, key):
+        """Write z=0..n for the stack at key."""
+        stack = self._tiles_in_stack(key)
+        for i, t in enumerate(stack):
+            t["z"] = i
+
+    def _send_to_bottom_of_current_stack(self, tile):
+        """Make this tile the bottom (z=0) of its current stack."""
+        x, y = tile["x"], tile["y"]
+        # Set temporary negative z so it sorts to the bottom, then normalize
+        tile["z"] = -1
+        self._normalize_stack_z(x, y)
+
+    def _move_tile_to_bottom_of_current_stack(self, tile):
+        """
+        Put tile at z=0 within its stack; shift others up by one (stable order).
+        No temp -1. No touching draw offsets.
+        """
+        key = self._stack_key(tile)
+        stack = self._tiles_in_stack(key)
+        if not stack or stack[0] is tile:
+            return
+        others = [t for t in stack if t is not tile]
+        new_order = [tile] + others
+        # write back
+        for i, t in enumerate(new_order):
+            t["z"] = i
+
+    def _find_nearest_stack_horiz(self, sx, sy):
+        """
+        Find the nearest occupied stack LEFT/RIGHT on the same row (gy) by keys.
+        Tie → LEFT. Returns (tx, ty) in the SAME coordinate mode you use for drawing.
+        """
+        s_key = self._stack_key_from_xy(sx, sy)
+        sgx, sgy = s_key
+
+        occupied = {self._stack_key(t) for t in self.board}
+        row = sorted({(gx, gy) for (gx, gy) in occupied if gy == sgy and gx != sgx})
+        if not row:
+            return None
+
+        left = [gx for gx, gy in row if gx < sgx]
+        right = [gx for gx, gy in row if gx > sgx]
+        left_choice = max(left) if left else None
+        right_choice = min(right) if right else None
+
+        if left_choice is None and right_choice is None:
+            return None
+        if left_choice is None:
+            gx = right_choice
+        elif right_choice is None:
+            gx = left_choice
+        else:
+            gx = left_choice if (sgx - left_choice) <= (right_choice - sgx) else right_choice
+
+        gy = sgy
+        # Return coordinates in your storage mode
+        if self.USE_PIXEL_COORDS:
+            return (gx * self.cell_w, gy * self.cell_h)
+        else:
+            return (gx, gy)
+
+
 
     def banish_tile_to_bottom(self):
 
@@ -3667,6 +3930,118 @@ class MahjongGame(QWidget):
             print("[ARACHNE] Charges depleted. Removing item.")
             if item in self.inventory:
                 self.inventory.remove(item)
+
+    def use_oni(self, item):
+        """
+        Active ONI click entrypoint.
+        Enforces cooldown/charges, logs use, runs effect, starts cooldown.
+        """
+        if item.get("cooldown_remaining", 0) > 0:
+            print("[COOLDOWN] Oni still on match cooldown.")
+            return
+
+        cr = int(item.get("cooldown_remaining", 0))
+
+        if cr > 0:
+            print(f"[CLICK] inventory_{item_index} button clicked")
+            s = "match" if cr == 1 else "matches"
+            print(f"[COOLDOWN] Oni still on match cooldown ({cr} {s} remaining).")
+            return
+
+        charges = int(item.get("charges", 0))
+        if charges <= 0:
+            print("[ITEM] oni has no charges left.")
+            return
+
+        print(f"[USE] Oni used. Charges left: {charges - 1}")
+        print("[TRIGGER] Oni activated.")
+        self._oni_sink_effect()
+
+        # cooldown + charge consumption
+        item["charges"] = charges - 1
+        cd = int(item.get("cooldown_match", 0))
+        item["cooldown_remaining"] = cd if item["charges"] > 0 else 0
+        if item["charges"] <= 0:
+            try:
+                self.inventory.remove(item)
+            except ValueError:
+                pass
+
+    def _oni_sink_effect(self):
+        DEVIL_KEY = "the devil"  # normalization handles variants
+
+        # STEP 0: Sink all exposed Devils to bottom of their current stacks
+        devils = self._get_type_tiles(DEVIL_KEY)
+        if not devils:
+            print("[ONI] No Devil tiles present.")
+            self.update_canvas()
+            return
+
+        exposed_devils = [t for t in devils if self._is_exposed(t)]
+        for t in exposed_devils:
+            self._move_tile_to_bottom_of_current_stack(t)  # ← no -1, proper reindex
+        if exposed_devils:
+            print(f"[ONI] Sunk {len(exposed_devils)} exposed Devil tile(s) to bottom of their stacks.")
+
+        # Refresh
+        devils = self._get_type_tiles(DEVIL_KEY)
+
+        # Branch A: all exposed & z==0 → remove + score
+        all_exposed_and_z0 = all(self._is_exposed(t) and t.get("z", 0) == 0 for t in devils)
+        if all_exposed_and_z0:
+            removed_count = len(devils)
+            before = len(self.board)
+            self.board = [t for t in self.board if not self._is_tile_type(t, DEVIL_KEY)]
+            after = len(self.board)
+            gained = 666 * (removed_count // 2)
+            self.score += gained
+            print(
+                f"[ONI] All Devils exposed at z=0 → removed {removed_count} (board {before}->{after}). Scored {gained}.")
+            self.update_canvas()
+            return
+
+        # Branch B: otherwise bury exposed z==0 devils under nearest left/right stack
+        moved = 0
+        for t in self._get_type_tiles(DEVIL_KEY):
+            if t.get("z", 0) == 0 and self._is_exposed(t):
+                target = self._find_nearest_stack_horiz(t["x"], t["y"])
+                if target is not None:
+                    tx, ty = target
+                    self._move_tile_to_stack_bottom(t, tx, ty)  # ← no -1, proper reindex
+                    moved += 1
+        if moved:
+            print(f"[ONI] Buried {moved} Devil tile(s) at z=0 under nearest stacks.")
+        else:
+            print("[ONI] No Devil tiles qualified for burying.")
+
+        self.update_canvas()
+
+    def _move_tile_to_stack_bottom(self, tile, tx, ty):
+        """
+        Move tile to bottom of *destination* stack; source closes gap.
+        tx,ty can be either grid coords or pixels (auto-quantized).
+        """
+        src_key = self._stack_key(tile)
+        dst_key = self._stack_key_from_xy(tx, ty)
+
+        # remove from source
+        src_stack = [t for t in self._tiles_in_stack(src_key) if t is not tile]
+        for i, t in enumerate(src_stack):
+            t["z"] = i
+
+        # add to destination at bottom
+        dst_stack = self._tiles_in_stack(dst_key)
+        new_order = [tile] + dst_stack
+        for i, t in enumerate(new_order):
+            # IMPORTANT: set tile’s logical stack position to dst key
+            if t is tile:
+                # if you store grid index separately, set those here instead of raw x,y
+                if self.USE_PIXEL_COORDS:
+                    t["x"] = dst_key[0] * self.cell_w
+                    t["y"] = dst_key[1] * self.cell_h
+                else:
+                    t["x"], t["y"] = dst_key
+            t["z"] = i
 
     def apply_wendigo_start_of_round(self):
         w = self.get_item_by_id("wendigo")
