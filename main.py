@@ -74,7 +74,7 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 
 from assets.fx.particle import SmokeParticle, SparkleParticle, FireParticle, WindParticle, \
-    SelectedParticle, ComboBand, SelectedParticle_B
+    SelectedParticle, ComboBand, SelectedParticle_B, SelectedParticle_Fire
 from music import MusicManager
 
 
@@ -259,6 +259,15 @@ class MahjongGame(QWidget):
 
             self.available_encounters_bu = []
 
+            # Cerberus effect state
+            self.cerberus_active = False
+            self.cerberus_selecting = False
+            self.cerberus_pending_keys = []
+            self.cerberus_effect_active = False
+            self.cerberus_effect_keys = set()
+            self.cerberus_saved_orders = {}  # key -> [tiles bottom->top before inversion]
+            self.cerberus_emit_tick = 0  # simple rate limiter for particles
+
             pygame.init()
             try:
                 pygame.mixer.init()
@@ -314,6 +323,7 @@ class MahjongGame(QWidget):
 
             self.tile_images = {}
             self.load_tileset_images()
+            self._init_board_metrics()  # ← add this
             self.target_score = self.calculate_target_score()
 
             self.action_bar = ActionBar(self)
@@ -423,6 +433,28 @@ class MahjongGame(QWidget):
         layout.addWidget(self.canvas_label)
 
         self.setLayout(layout)
+
+    def _init_board_metrics(self):
+        # Tile size: derive from any loaded tile image or use a sane fallback
+        if not hasattr(self, "TILE_WIDTH") or not hasattr(self, "TILE_HEIGHT"):
+            sample = next(iter(self.tile_images.values()), None)
+            if sample is not None:
+                self.TILE_WIDTH, self.TILE_HEIGHT = sample.get_width(), sample.get_height()
+            else:
+                self.TILE_WIDTH, self.TILE_HEIGHT = 64, 88  # fallback
+
+        # Board origin (top-left of the grid in window pixels)
+        if not hasattr(self, "board_origin_x"): self.board_origin_x = 0
+        if not hasattr(self, "board_origin_y"): self.board_origin_y = 0
+
+        # Optional stack visual offsets (don’t affect logic)
+        if not hasattr(self, "stack_dx"): self.stack_dx = 0
+        if not hasattr(self, "stack_dy"): self.stack_dy = 0
+
+        # Define a board rectangle you consider “clickable board area”
+        surf_w, surf_h = self.surface.get_size()
+        bar_h = getattr(self, "ACTION_BAR_HEIGHT", 80)
+        self.board_rect = pygame.Rect(0, 0, surf_w, max(0, surf_h - bar_h))
 
     def set_encounter_mode(self, mode):
         print(f"[DEBUG] Encounter mode set to: {mode}")
@@ -727,6 +759,12 @@ class MahjongGame(QWidget):
         # 2) Optional debug marker
         self._debug_click_marker(x, y)
 
+        # Cerberus targeting gets first dibs (modal)
+        if getattr(self, "cerberus_selecting", False):
+            # NOTE: call the function you actually implemented
+            if self._cerberus_target_click(event):
+                return
+
         # 3) Global UI buttons (music, sliders, shop buttons, booster buttons, etc.)
         if self._handle_global_buttons(event, x, y):
             return
@@ -755,11 +793,121 @@ class MahjongGame(QWidget):
             return
 
         # 9) Fallback: tile selection in the board area
+
+        # -- CERBERUS TARGETING (pick 3 stacks) --
+        if getattr(self, "cerberus_targeting", False):
+            t = self._topmost_tile_at_point(event.pos().x(), event.pos().y())
+            if not t:
+                return  # click missed; stay in targeting
+            key = self._stack_key(t)
+            if key not in self.cerberus_pending_keys:
+                self.cerberus_pending_keys.append(key)
+                self._cerberus_flash_stack(key)  # quick visual feedback
+                print(f"[CERBERUS] Selected stack {key} ({len(self.cerberus_pending_keys)}/3)")
+            if len(self.cerberus_pending_keys) == 3:
+                self._cerberus_activate()
+            return
+
         self.handle_click(event)
 
-    # -----------------------------
-    # Helpers (single-responsibility)
-    # -----------------------------
+    def _topmost_tile_at_point(self, px, py):
+        """Return topmost tile at pixel (px,py). Adapt get_tile_rect(...) to your code."""
+        # sort top-down
+        for t in sorted(self.board, key=lambda a: a.get("z", 0), reverse=True):
+            try:
+                r = self.get_tile_rect(t)  # <-- you likely have this; otherwise compute from draw pos + size
+                if r.collidepoint(px, py):
+                    return t
+            except Exception:
+                pass
+        return None
+
+    def _stack_draw_rect(self, key):
+        """Screen-space rect of the TOP tile in this stack (what the user sees/clicks)."""
+        stack = self._tiles_in_stack(key)
+        if not stack:
+            return None
+        top = stack[-1]
+        return self._tile_screen_rect(top)  # must match your draw/hit-test math
+
+    def _cerberus_flash_stack(self, key, final: bool = False):
+        """
+        Spawn particles aligned to the visible tile rect (screen coords),
+        so offsets/origin/zoom are respected.
+        """
+        rect = self._stack_draw_rect(key)
+        if rect is None:
+            return
+        sx, sy, sw, sh = rect
+        n = 24 if not final else 48
+
+        if hasattr(self, "particles"):
+            try:
+                # If your particle takes a rect: (x, y, w, h)
+                for _ in range(n):
+                    self.particles.append(SelectedParticle_Fire(int(sx), int(sy), int(sw), int(sh)))
+            except Exception:
+                # Fallback: if it expects a center point, emit around center
+                cx, cy = int(sx + sw / 2), int(sy + sh / 2)
+                for _ in range(n):
+                    self.particles.append(SelectedParticle_Fire(cx, cy, 0, 0))
+
+    def _cerberus_activate(self):
+        keys = getattr(self, "cerberus_pending_keys", [])
+        if len(keys) < 3:
+            return
+
+        # Invert each selected stack (reverse z)
+        inverted = 0
+        for key in keys:
+            stack = self._tiles_in_stack(key)
+            if not stack:
+                continue
+            new_order = list(reversed(stack))
+            for i, t in enumerate(new_order):
+                t["z"] = i
+            inverted += 1
+
+        print(f"[CERBERUS] Inverted {inverted} stack(s).")
+
+        # Consume charge + set cooldown (guarded)
+        idx = getattr(self, "cerberus_item_index", None)
+        if idx is not None and 0 <= idx < len(self.inventory):
+            item = self.inventory[idx]
+            charges = int(item.get("charges", 0))
+            item["charges"] = max(0, charges - 1)
+            cd = int(item.get("cooldown_match", 0))
+            item["cooldown_remaining"] = cd if item["charges"] > 0 else 0
+            print(f"[USE] Cerberus used. Charges left: {item['charges']}")
+            if cd and item["charges"] > 0:
+                s = "match" if cd == 1 else "matches"
+                print(f"[COOLDOWN] Cerberus set to {cd} {s}.")
+            if item["charges"] <= 0:
+                try:
+                    self.inventory.remove(item)
+                except ValueError:
+                    pass
+        else:
+            print("[CERBERUS/WARN] Missing cerberus_item_index; skipping charge/cooldown.")
+
+        # Clear targeting state
+        self.cerberus_selecting = False
+        self.cerberus_pending_keys = []
+        self.cerberus_item_index = None
+
+        self.update_canvas()
+
+    def _cerberus_add_particles(self, keys):
+        try:
+            for key in keys:
+                stack = self._tiles_in_stack(key)
+                if not stack: continue
+                top = max(stack, key=lambda t: t.get("z", 0))
+                cx, cy = self.get_draw_pos(top)
+                for _ in range(40):
+                    self.particles.append(SelectedParticle_B(cx, cy, self.TILE_WIDTH, self.TILE_HEIGHT))
+        except Exception:
+            pass
 
     def _handle_sell_confirm_modal_click(self, x, y):
         """
@@ -1306,6 +1454,8 @@ class MahjongGame(QWidget):
         self.handle_inventory_effect(item, index)
 
     def handle_inventory_effect(self, item, index):
+        uid = (item.get("unique_id") or "").lower()
+
         effect_type = item.get("effect")
         if effect_type == "shuffle":
             self.shuffle_board()
@@ -1342,9 +1492,33 @@ class MahjongGame(QWidget):
             self.djinn_wish(item)
         elif effect_type == "oni_sink":
             self.use_oni(item)
+        if uid == "cerberus":
+            # If we're already in targeting mode, don't spend a charge—just remind the user.
+            if getattr(self, "cerberus_selecting", False):
+                remaining = 3 - len(getattr(self, "cerberus_pending_keys", []))
+                print(f"[CERBERUS] Already targeting — pick {remaining} more.")
+                return
 
-        else:
-            print(f"[EFFECT] No defined logic for effect: {effect_type}")
+            # (Optional) If the effect is already active after inversion, ignore further uses.
+            if getattr(self, "cerberus_effect_active", False):
+                print("[CERBERUS] Effect already active.")
+                return
+
+            # cooldown gate
+            cr = int(item.get("cooldown_remaining", 0))
+            if cr > 0:
+                s = "match" if cr == 1 else "matches"
+                print(f"[CLICK] inventory_{index} button clicked")
+                print(f"[COOLDOWN] Cerberus still on match cooldown ({cr} {s} remaining).")
+                return
+
+            # charges gate
+            if int(item.get("charges", 0)) <= 0:
+                print("[ITEM] Cerberus has no charges left.")
+                return
+
+            self.use_cerberus(index)
+            return
 
     def handle_mouse_up(self, event):
         self.dragging_volume = False
@@ -1847,6 +2021,13 @@ class MahjongGame(QWidget):
         self.center_y = (self.min_grid_y + self.max_grid_y) // 2
 
     def is_tile_selectable(self, tile):
+        # inside is_tile_selectable(self, tile):
+        if getattr(self, "cerberus_active", False):
+            if self._stack_key(tile) in getattr(self, "cerberus_marked_stacks", set()):
+                # Allow selection even if left/right are blocked, but still require NOT covered from above
+                if self._is_exposed(tile):  # no tile above in same stack
+                    return True
+
         gx, gy, gz = tile["grid_x"], tile["grid_y"], tile["z"]
 
         # Must have no tile above
@@ -1866,6 +2047,61 @@ class MahjongGame(QWidget):
             if key not in topmost or tile["z"] > topmost[key]["z"]:
                 topmost[key] = tile
         return topmost
+
+    def _screen_to_board(self, px, py):
+        """Undo origin + scroll + zoom → board pixels."""
+        origin_x = getattr(self, "board_origin_x", 0)
+        origin_y = getattr(self, "board_origin_y", 0)
+        scroll_x = getattr(self, "scroll_x", 0)
+        scroll_y = getattr(self, "scroll_y", 0)
+        zoom = max(getattr(self, "zoom", 1.0), 1e-6)
+        bx = (px - origin_x + scroll_x) / zoom
+        by = (py - origin_y + scroll_y) / zoom
+        return bx, by
+
+    def _tile_screen_rect(self, tile):
+        # (Use the same version you use for hit-testing)
+        tw = getattr(self, "TILE_WIDTH", TILE_WIDTH)
+        th = getattr(self, "TILE_HEIGHT", TILE_HEIGHT)
+
+        origin_x = getattr(self, "board_origin_x", 0)
+        origin_y = getattr(self, "board_origin_y", 0)
+        scroll_x = getattr(self, "scroll_x", 0)
+        scroll_y = getattr(self, "scroll_y", 0)
+        zoom = max(getattr(self, "zoom", 1.0), 1e-6)
+
+        x, y = tile["x"], tile["y"]
+        z = tile.get("z", 0)
+        stack_dx = getattr(self, "stack_dx", 0)
+        stack_dy = getattr(self, "stack_dy", 0)
+        dx = tile.get("dx", 0)
+        dy = tile.get("dy", 0)
+
+        bx = x + z * stack_dx + dx - scroll_x
+        by = y - z * stack_dy + dy - scroll_y
+        sx = origin_x + bx * zoom
+        sy = origin_y + by * zoom
+        sw = tw * zoom
+        sh = th * zoom
+        return (sx, sy, sw, sh)
+
+    def _stack_screen_rect(self, key):
+        stack = self._tiles_in_stack(key)
+        if not stack:
+            return None
+        top = stack[-1]
+        return self._tile_screen_rect(top)
+
+    def _iter_topmost_tiles(self):
+        """
+        Yield tiles in top-down order (topmost first) for hit-testing.
+        Uses your get_topmost_tiles() and z-order.
+        """
+        topmap = self.get_topmost_tiles().values()
+        for t in reversed(sorted(topmap, key=lambda t: t.get("z", 0))):
+            yield t
+
+
 
     def count_remaining_tiles(self):
         return len(self.board)
@@ -1937,6 +2173,7 @@ class MahjongGame(QWidget):
         # self.draw_fog_of_war()
         self.draw_combo_fuse()
         self.action_bar.draw()  # External call to encapsulated class
+        self._cerberus_emit_particles()
         self.draw_particles()
         self.update_hover_state()
         self.draw_overlays()
@@ -2133,26 +2370,85 @@ class MahjongGame(QWidget):
         x = event.pos().x()
         y = event.pos().y()
 
-        # Convert Qt click to Pygame-style coordinates
-        for tile in reversed(sorted(self.get_topmost_tiles().values(), key=lambda t: t["z"])):
-            tx, ty = tile["x"], tile["y"]
-            if tx <= x <= tx + TILE_WIDTH and ty <= y <= ty + TILE_HEIGHT:
-                if self.is_tile_selectable(tile):
-                    if tile in self.selected_tiles:
-                        self.selected_tiles.remove(tile)
-                    else:
-                        self.selected_tiles.append(tile)
+        # Cerberus targeting (modal)
+        if getattr(self, "cerberus_selecting", False):
+            if self._cerberus_target_click(event):
+                return
 
-                    if len(self.selected_tiles) == 2:
-                        t1, t2 = self.selected_tiles
-                        if t1["name"] == t2["name"]:
-                            self.handle_match(t1, t2)
-                        else:
-                            # Unselect t1, keep t2 as the only selected tile
-                            self.selected_tiles = [t2]
-
-                    self.update_game_state()
+        # Hit-test
+        hit_tile = None
+        for tile in self._iter_topmost_tiles():
+            sx, sy, sw, sh = self._tile_screen_rect(tile)
+            if sx <= x <= sx + sw and sy <= y <= sy + sh:
+                hit_tile = tile
                 break
+        if not hit_tile:
+            return
+
+        # Cerberus-aware selectability
+        if not self.is_tile_selectable_override(hit_tile):
+            return
+
+        # Toggle selection
+        if hit_tile in self.selected_tiles:
+            self.selected_tiles.remove(hit_tile)
+        else:
+            self.selected_tiles.append(hit_tile)
+
+        # Match logic
+        if len(self.selected_tiles) == 2:
+            t1, t2 = self.selected_tiles
+
+            if t1.get("name") == t2.get("name"):
+                # >>> capture stack keys BEFORE tiles are mutated/removed <<<
+                k1 = self._stack_key(t1)
+                k2 = self._stack_key(t2)
+
+                self.handle_match(t1, t2)
+
+                # Revert Cerb if the match did NOT touch any marked stack
+                try:
+                    self._after_match_cerberus_by_keys({k1, k2})
+                except Exception:
+                    pass
+            else:
+                self.selected_tiles = [t2]
+
+
+        self.update_game_state()
+
+    def _after_match_cerberus_by_keys(self, matched_keys: set[tuple[int, int]]):
+        """
+        If Cerberus effect is active and none of the matched keys are marked,
+        revert all marked stacks to their saved orders (minus removed tiles),
+        then clear the effect & particles.
+        """
+        if not getattr(self, "cerberus_effect_active", False):
+            return
+
+        # If match touched a marked stack, keep effect
+        if not self.cerberus_effect_keys.isdisjoint(matched_keys):
+            # e.g., print(f"[CERBERUS] Match touched marked stack; keeping effect.")
+            return
+
+        restored = 0
+        for key in list(self.cerberus_effect_keys):
+            saved = self.cerberus_saved_orders.get(key, [])
+            if not saved:
+                continue
+
+            # Current members in that stack
+            current = self._tiles_in_stack(key)
+
+            # Rebuild order: saved sequence, minus removed tiles; append any new arrivals
+            new_order = [t for t in saved if t in current] + [t for t in current if t not in saved]
+            for i, t in enumerate(new_order):
+                t["z"] = i
+            restored += 1
+
+        print(f"[CERBERUS] Non-marked match → reverted {restored} stack(s) and clearing effect.")
+        self._cerberus_end_effect()
+        self.update_canvas()
 
     def handle_match(self, tile1, tile2):
         matched = [tile1, tile2]
@@ -2188,7 +2484,8 @@ class MahjongGame(QWidget):
 
         self.fading_matched_tiles = matched
         self.match_sound.play()
-        self.tick_item_cooldowns()
+        if self.cerberus_active == False:
+            self.tick_item_cooldowns()
 
         # Lycanthrope conditional bonus
         self.combo_level += self.handle_lycan_match(tile1["name"], lycanthrope_active=self.has_lycanthrope_item())
@@ -3488,7 +3785,15 @@ class MahjongGame(QWidget):
         return (gx, gy)
 
     def _stack_key(self, tile):
-        return self._stack_key_from_xy(tile["x"], tile["y"])
+        """
+        Logical stack key for a tile. If x,y are board pixels aligned to your grid,
+        quantize by TILE sizes. If they’re already grid coords, this still works.
+        """
+        tw = getattr(self, "TILE_WIDTH", TILE_WIDTH)
+        th = getattr(self, "TILE_HEIGHT", TILE_HEIGHT)
+        gx = int(math.floor(tile["x"] / max(tw, 1)))
+        gy = int(math.floor(tile["y"] / max(th, 1)))
+        return (gx, gy)
 
     def _tiles_in_stack(self, key):
         """All tiles that share the same stack (by key), sorted bottom→top."""
@@ -3943,7 +4248,6 @@ class MahjongGame(QWidget):
         cr = int(item.get("cooldown_remaining", 0))
 
         if cr > 0:
-            print(f"[CLICK] inventory_{item_index} button clicked")
             s = "match" if cr == 1 else "matches"
             print(f"[COOLDOWN] Oni still on match cooldown ({cr} {s} remaining).")
             return
@@ -4086,6 +4390,298 @@ class MahjongGame(QWidget):
             # optional: sfx/particles
         else:
             print("[WENDIGO] No item to the right; nothing devoured.")
+
+    def use_cerberus(self, item_index: int):
+        item = self.inventory[item_index]
+
+        # Already selecting? Don't consume, don't re-trigger.
+        if getattr(self, "cerberus_selecting", False):
+            remaining = 3 - len(getattr(self, "cerberus_pending_keys", []))
+            print(f"[CERBERUS] Already targeting — pick {remaining} more.")
+            return
+
+        # (Optional) If effect is active post-inversion, ignore.
+        if getattr(self, "cerberus_effect_active", False):
+            print("[CERBERUS] Effect already active.")
+            return
+
+        # Cooldown/charges, then start targeting and (if you want) consume here
+        cr = int(item.get("cooldown_remaining", 0))
+        if cr > 0:
+            s = "match" if cr == 1 else "matches"
+            print(f"[CLICK] inventory_{item_index} button clicked")
+            print(f"[COOLDOWN] Cerberus still on match cooldown ({cr} {s} remaining).")
+            return
+
+        charges = int(item.get("charges", 0))
+        if charges <= 0:
+            print("[ITEM] cerberus has no charges left.")
+            return
+
+        print(f"[USE] Cerberus used. Charges left: {charges - 1}")
+        item["charges"] = charges - 1
+        cd = int(item.get("cooldown_match", 0))
+        item["cooldown_remaining"] = cd if item["charges"] > 0 else 0
+
+        if item["charges"] <= 0:
+            try:
+                self.inventory.remove(item)
+            except ValueError:
+                pass
+
+        # Enter targeting mode
+        self.cerberus_selecting = True
+        self.cerberus_pending_keys = []
+        print("[TRIGGER] Cerberus activated.")
+        print("[CERBERUS] Select 3 tiles to invert their stacks...")
+
+    def _stack_key_from_click(self, sx: int, sy: int, *, snap=True):
+        """Screen click → snapped stack key (or None)."""
+        bx, by = self._screen_to_board_coords(sx, sy)
+        raw_key = self._board_to_grid_key(bx, by)
+        if not snap:
+            return raw_key
+        key = self._snap_to_occupied_key(raw_key)
+        if key is None:
+            # Debug to understand misses
+            sample = sorted(list(self._get_occupied_stack_keys()))[:10]
+            print(
+                f"[CERBERUS/DEBUG] click=({sx},{sy}) → board=({bx:.1f},{by:.1f}) raw_key={raw_key} occ_sample={sample}")
+        return key
+
+    def _board_to_grid_key(self, bx, by):
+        """Board pixels → integer grid cell."""
+        tw = getattr(self, "TILE_WIDTH", TILE_WIDTH)
+        th = getattr(self, "TILE_HEIGHT", TILE_HEIGHT)
+        return (int(math.floor(bx / max(tw, 1))),
+                int(math.floor(by / max(th, 1))))
+
+    def _cerberus_target_click(self, event) -> bool:
+        px, py = event.pos().x(), event.pos().y()
+
+        # (board_rect guard optional)
+        if hasattr(self, "board_rect") and not self.board_rect.collidepoint(px, py):
+            print("[CERBERUS] Click on UI; select a tile on the board.")
+            return True
+
+        tile = self._topmost_tile_at_point(px, py)
+        if tile is None:
+            key = self._stack_key_from_point(px, py, snap=True)
+            stack = self._tiles_in_stack(key) if key is not None else []
+            if not stack:
+                print("[CERBERUS] No stack at click. Try again.")
+                return True
+        else:
+            key = self._stack_key(tile)
+
+        if key in self.cerberus_pending_keys:
+            print(f"[CERBERUS] Stack {key} already selected.")
+            return True
+
+        self.cerberus_pending_keys.append(key)
+        if hasattr(self, "_cerberus_flash_stack"):
+            self._cerberus_flash_stack(key)
+
+        remaining = 3 - len(self.cerberus_pending_keys)
+        print(f"[CERBERUS] Selected stack {key} ({len(self.cerberus_pending_keys)}/3). "
+              f"{'Ready!' if remaining == 0 else f'{remaining} to go.'}")
+
+        if len(self.cerberus_pending_keys) == 3:
+            self._cerberus_apply_and_finish()
+
+        self.update_canvas()
+        return True
+
+    def _cerberus_apply_and_finish(self):
+        """Invert each selected stack, then enter 'effect active' mode with persistent particles."""
+        keys = list(getattr(self, "cerberus_pending_keys", []))
+        if not keys:
+            return
+
+        # Save original orders (bottom->top) for later revert
+        self.cerberus_saved_orders = {}
+        for key in keys:
+            self.cerberus_saved_orders[key] = list(self._tiles_in_stack(key))
+
+        # Invert stacks now
+        inverted = 0
+        for key in keys:
+            stack = self._tiles_in_stack(key)
+            if not stack:
+                continue
+            new_order = list(reversed(stack))
+            for i, t in enumerate(new_order):
+                t["z"] = i
+            inverted += 1
+
+        # Effect is now active: persistent emit + side-free select in these stacks
+        self.cerberus_effect_active = True
+        self.cerberus_effect_keys = set(keys)
+
+        # Clear targeting UI state
+        self.cerberus_selecting = False
+        self.cerberus_pending_keys.clear()
+
+        print(f"[CERBERUS] Inverted {inverted} stack(s). Cerberus effect active.")
+        self.update_canvas()
+
+    def cerberus_on_match(self, matched_tiles: list):
+        """Call after each successful match resolution."""
+        if not getattr(self, "cerberus_active", False):
+            return
+
+        matched_keys = {self._stack_key(t) for t in matched_tiles}
+        if matched_keys & self.cerberus_marked_stacks:
+            # A marked stack participated → keep effect; do nothing.
+            return
+
+        # No marked stacks used → revert all
+        self._cerberus_revert("match_without_marked_stack")
+
+    def is_tile_selectable_override(self, tile) -> bool:
+        """
+        While Cerberus is active:
+          - tiles in marked stacks ignore left/right blocks (only require not covered from above)
+        Otherwise:
+          - fall back to your normal is_tile_selectable(tile).
+        """
+        if getattr(self, "cerberus_effect_active", False) and (self._stack_key(tile) in self.cerberus_effect_keys):
+            # keep 'no tile above' constraint, bypass side-free constraint
+            return self._is_exposed(tile)  # your "not covered from above" test
+        # normal rules
+        return self.is_tile_selectable(tile)
+
+    def _after_match_cerberus(self, matched_tiles):
+        """
+        If Cerberus is active and the match did NOT use any marked stack,
+        revert all marked stacks to their original order (minus removed tiles),
+        then clear all cerberus particles and disable the effect.
+        """
+        if not getattr(self, "cerberus_effect_active", False):
+            return
+
+        matched_keys = {self._stack_key(t) for t in matched_tiles if t}
+        if not self.cerberus_effect_keys.isdisjoint(matched_keys):
+            # match touched a marked stack → keep effect active
+            return
+
+        # Revert each marked stack to saved order (skip tiles that were removed)
+        restored = 0
+        for key, saved_order in self.cerberus_saved_orders.items():
+            # Current members that are still in this stack
+            current = [t for t in self._tiles_in_stack(key)]
+            # Keep saved order but only tiles that still exist in this stack
+            restored_order = [t for t in saved_order if t in current]
+            # Append any newcomers (should be rare), preserving their current relative order
+            extras = [t for t in current if t not in restored_order]
+            new_order = restored_order + extras
+            for i, t in enumerate(new_order):
+                t["z"] = i
+            restored += 1
+
+        print(f"[CERBERUS] Non-marked match detected → reverted {restored} stack(s) and clearing effect.")
+        self._cerberus_end_effect()
+        self.update_canvas()
+
+    def _cerberus_end_effect(self):
+        """Stop emitting, remove existing Cerberus particles, clear state."""
+        self.cerberus_effect_active = False
+        self.cerberus_effect_keys.clear()
+        self.cerberus_saved_orders.clear()
+
+        # purge existing particles we tagged
+        if hasattr(self, "particles"):
+            self.particles = [p for p in self.particles if getattr(p, "tag", None) != "cerberus"]
+
+    def _cerberus_emit_particles(self):
+        if not getattr(self, "cerberus_effect_active", False):
+            return
+
+        # OPTIONAL: remove the rate limit if you want denser/constant effect
+        # self.cerberus_emit_tick = (self.cerberus_emit_tick + 1) % 3
+        # if self.cerberus_emit_tick != 0:
+        #     return
+
+        for key in list(self.cerberus_effect_keys):
+            stack = self._tiles_in_stack(key)
+            if not stack:
+                continue
+            sx, sy, sw, sh = self._tile_screen_rect(stack[-1])
+            for _ in range(6):  # raise for more density
+                try:
+                    p = SelectedParticle_Fire(int(sx), int(sy), int(sw), int(sh))
+                except TypeError:
+                    p = SelectedParticle_Fire(int(sx + sw / 2), int(sy + sh / 2), 0, 0)
+                setattr(p, "tag", "cerberus")
+                self.particles.append(p)
+
+    def _cerberus_revert(self, reason=""):
+        orders = getattr(self, "cerberus_original_orders", {})
+        if not orders:
+            # Safety
+            self.cerberus_active = False
+            self.cerberus_marked_stacks = set()
+            self.update_canvas()
+            print("[CERBERUS] Deactivated (no saved order).")
+            return
+
+        for key, original in orders.items():
+            # original: list[(tile, original_z)]
+            # Only reorder tiles that are still on board
+            present = [(t, z) for (t, z) in original if t in self.board]
+            # Sort by original z then write z=0..n
+            present.sort(key=lambda pair: pair[1])
+            for i, (t, _z) in enumerate(present):
+                t["z"] = i
+            # Ensure contiguous
+            self._reindex_stack(key)
+
+        self.cerberus_active = False
+        self.cerberus_marked_stacks = set()
+        self.cerberus_original_orders = {}
+
+        print(f"[CERBERUS] Reverted stacks due to {reason}.")
+        self.update_canvas()
+
+    def _occupied_stack_keys(self):
+        return {self._stack_key(t) for t in self.board}
+
+    def _stack_key_from_point(self, px, py, *, snap=True):
+        """Screen click → (snapped) stack key or None."""
+        bx, by = self._screen_to_board(px, py)
+        raw_key = self._board_to_grid_key(bx, by)
+        if not snap:
+            return raw_key
+        key = self._snap_to_occupied_key(raw_key)
+        if key is None:
+            # Helpful debug
+            sample = sorted(list(self._occupied_stack_keys()))[:10]
+            print(f"[CERBERUS/DEBUG] click=({px},{py}) board=({bx:.1f},{by:.1f}) raw_key={raw_key} occ_sample={sample}")
+        return key
+
+    def _snap_to_occupied_key(self, raw_key, max_cheby=1, max_dist_keys=2):
+        """
+        Try exact key; then Chebyshev ring search; then nearest occupied within max_dist_keys.
+        Returns a key or None.
+        """
+        occ = self._occupied_stack_keys()
+        if raw_key in occ:
+            return raw_key
+
+        rx, ry = raw_key
+        # small neighborhood search
+        for r in range(1, max_cheby + 1):
+            for gx in range(rx - r, rx + r + 1):
+                for gy in range(ry - r, ry + r + 1):
+                    if (gx, gy) in occ:
+                        return (gx, gy)
+
+        if not occ:
+            return None
+        nearest = min(occ, key=lambda k: (k[0] - rx) ** 2 + (k[1] - ry) ** 2)
+        cheby = max(abs(nearest[0] - rx), abs(nearest[1] - ry))
+        return nearest if cheby <= max_dist_keys else None
+
 
     def tick_item_cooldowns(self):
         for item in self.inventory:

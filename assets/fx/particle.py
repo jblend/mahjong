@@ -295,6 +295,109 @@ class SelectedParticle_B:
 
         surface.blit(surf, (px - 2, py - 2))
 
+class SelectedParticle_Fire:
+    """
+    Perimeter-tracing 'flame' particle:
+      - Traverses the rectangle perimeter (like SelectedParticle_B)
+      - Colors from INFERNO_CMAP with alpha fade (like FireParticle)
+      - Small outward drift along edge normal to feel 'fiery'
+    """
+    def __init__(self, x, y, width, height):
+        # Emitter rectangle (screen-space)
+        self.rect_x = x
+        self.rect_y = y
+        self.width = max(1, int(width))
+        self.height = max(1, int(height))
+
+        # Perimeter motion
+        self.perimeter = 2 * (self.width + self.height)
+        self.perimeter_pos = random.uniform(0, self.perimeter)
+        self.speed = random.uniform(2.0, 4.0)  # px/frame along the edge path
+
+        # Lifetime (ms) & fade
+        self.lifetime_ms = random.randint(600, 900)
+        self.start_time = pygame.time.get_ticks()
+
+        # Size & drift
+        self.base_radius = random.randint(3, 5)
+        self.max_perp_drift = random.uniform(3.0, 7.0)   # outward from edge
+        self.jitter = random.uniform(0.5, 1.25)          # small lateral wobble
+
+        # Cache current draw state
+        self.alpha = 255
+        self.rgb = (255, 180, 80)
+
+    def _edge_point_and_normal(self, pos):
+        """
+        Return (px,py) on perimeter and outward normal (nx,ny) for the given pos.
+        Screen Y increases downward, so 'outward' is: top(-y), right(+x), bottom(+y), left(-x).
+        """
+        x, y, w, h = self.rect_x, self.rect_y, self.width, self.height
+
+        if pos < w:                               # top edge, left→right
+            px, py = x + pos, y
+            nx, ny = 0.0, -1.0
+        elif pos < w + h:                         # right edge, top→bottom
+            t = pos - w
+            px, py = x + w, y + t
+            nx, ny = 1.0, 0.0
+        elif pos < w + h + w:                     # bottom edge, right→left
+            t = pos - (w + h)
+            px, py = x + w - t, y + h
+            nx, ny = 0.0, 1.0
+        else:                                     # left edge, bottom→top
+            t = pos - (2 * w + h)
+            px, py = x, y + h - t
+            nx, ny = -1.0, 0.0
+
+        return (px, py), (nx, ny)
+
+    def update(self):
+        # Time-based progress
+        now = pygame.time.get_ticks()
+        elapsed = now - self.start_time
+        if elapsed >= self.lifetime_ms:
+            return False
+
+        progress = max(0.0, min(1.0, elapsed / self.lifetime_ms))  # 0→1
+
+        # Advance along perimeter
+        self.perimeter_pos = (self.perimeter_pos + self.speed) % self.perimeter
+
+        # Color & alpha from Inferno
+        r, g, b, _ = INFERNO_CMAP(progress)  # 0..1 floats
+        self.rgb = (int(r * 255), int(g * 255), int(b * 255))
+        self.alpha = int(255 * (1.0 - progress))  # fade out over lifetime
+
+        return True
+
+    def draw(self, surface):
+        if self.alpha <= 0:
+            return
+
+        # Base point + outward drift
+        (px, py), (nx, ny) = self._edge_point_and_normal(self.perimeter_pos)
+
+        # Make flames 'lick' outward, more drift later in life; add tiny wobble
+        # Use perimeter_pos as a phase so neighbors don't sync
+        phase = (self.perimeter_pos * 0.025)
+        wobble = (math.sin(phase) + math.cos(1.37 * phase)) * 0.5
+        life_scale = 0.35 + 0.65 * (1.0 - self.alpha / 255.0)  # grows a bit as it fades
+        drift = self.max_perp_drift * life_scale
+
+        ox = nx * drift + wobble * self.jitter
+        oy = ny * drift + wobble * self.jitter
+
+        # Flame radius: grows slightly, then shrinks
+        t = 1.0 - self.alpha / 255.0
+        radius = max(2, int(self.base_radius + 2 * (1.0 - abs(2 * t - 1.0))))
+
+        # Draw
+        size = radius * 2
+        surf = pygame.Surface((size, size), pygame.SRCALPHA)
+        pygame.draw.circle(surf, (*self.rgb, self.alpha), (radius, radius), radius)
+        surface.blit(surf, (px + ox - radius, py + oy - radius))
+
 class ComboBand:
     def __init__(self, x, y, width, height, color, duration, current_points=0, max_points=5):
         self.x = x

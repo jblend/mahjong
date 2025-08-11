@@ -218,5 +218,29 @@
   "cooldown_match": 0,
   "cost": 500,
   "description": "At start of round: lose 1 charge. Halves cooldowns and charges of other items. At end of round: destroy the item to the right; if destroyed, gain 1 charge."
+},
+{
+  "unique_id": "oni",
+  "title": "Oni",
+  "image": "assets/items/oni.png",
+  "rarity": "uncommon",
+  "type": "active",
+  "charges": 6,
+  "cooldown_match": 15,
+  "cost": 500,
+  "description": "Exposed Devil tiles sink to the bottom of their stacks. If every Devil tile is exposed at z=0, remove them all and score 666 per pair; otherwise, any exposed Devil at z=0 is buried under the nearest left/right stack.",
+  "effect": "oni_sink"
+},
+  {
+  "unique_id": "cerberus",
+  "title": "Cerberus",
+  "image": "assets/items/cerberus.png",
+  "rarity": "rare",
+  "type": "active",
+  "charges": 3,
+  "cooldown_match": 9,
+  "cost": 800,
+  "description": "Select 3 stacks: invert them, mark with particles, and ignore side-blocking while active. Revert when a match excludes marked stacks.",
+  "effect": "cerberus_delve"
 }
 ]
