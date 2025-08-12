@@ -2722,14 +2722,22 @@ class MahjongGame(QWidget):
         self.update()
 
     def update_game_state(self):
-        moves = self.get_possible_match_count()
+        # Don’t evaluate round end if we’re already in a terminal/transition UI
+        if getattr(self, "in_shop", False) or getattr(self, "in_game_over", False):
+            return
+        if getattr(self, "_round_end_resolved", False):
+            return  # prevent spam until next round resets this flag
 
+        moves = self.get_possible_match_count()
         if moves > 0:
             return
 
+        # Mark so we don't re-run this block until the next round
+        self._round_end_resolved = True
+
+        # Any end-of-round effects first
         self.resolve_wendigo_end_of_round()
 
-        # No more moves, evaluate result
         round_success = self.score >= self.target_score
 
         if not round_success:
@@ -2739,42 +2747,41 @@ class MahjongGame(QWidget):
 
                 item = getattr(self, "djinn_current_item", None)
                 if item:
-                    item["charges"] -= 1
-                    print(f"[DJINN] Charge used. Remaining: {item['charge']}")
-
-                    if item["charges"] <= 0:
+                    item["charges"] = int(item.get("charges", 0)) - 1
+                    print(f"[DJINN] Charge used. Remaining: {item['charges']}")
+                    if item["charges"] <= 0 and item in self.inventory:
                         print("[DJINN] All charges used. Item consumed.")
-                        if item in self.inventory:
-                            self.inventory.remove(item)
+                        self.inventory.remove(item)
 
                 # Clear Djinn flags
                 self.djinn_active = False
                 self.djinn_target_increase = 0
                 self.djinn_current_item = None
 
-                self.enter_shop_screen()
-                return  # Prevent game over
-
-            else:
-                self.trigger_game_over()
-
-        else:
-            print("[STATE] No moves left but target score met → Entering Shop")
-
-            # If Djinn was active and we succeeded, still consume a charge
-            if getattr(self, "djinn_active", False):
-                # Consume one charge per use (already done), now resolve outcome
-                for item in getattr(self, "djinn_used_items", []):
-                    if not round_success:
-                        print("[DJINN] Failed round with active Djinn. Wallet is now 0.")
-                        self.wallet = 0
-                        break  # Only one fail triggers the wallet nuke
-
-                self.djinn_active = False
-                self.djinn_target_increase = 0
-                self.djinn_used_items = []
-                self.enter_shop_screen()
+                # Go to shop even though we failed (per Djinn effect)
+                self.enter_shop_screen()  # ← this actually enters the shop
                 return
+
+            # No Djinn bailout → game over
+            self.trigger_game_over()
+            return
+
+        # ----- Success path -----
+        print("[STATE] No moves left but target score met → Entering Shop")
+
+        # If Djinn was active and we succeeded, still consume a charge (if applicable) and clear flags
+        if getattr(self, "djinn_active", False):
+            for item in list(getattr(self, "djinn_used_items", [])):
+                item["charges"] = int(item.get("charges", 0)) - 1
+                if item["charges"] <= 0 and item in self.inventory:
+                    self.inventory.remove(item)
+            self.djinn_active = False
+            self.djinn_target_increase = 0
+            self.djinn_used_items = []
+
+        # Always enter the shop on success (regardless of Djinn)
+        self.enter_shop_screen()  # ← this was missing when Djinn wasn’t active
+        return
 
     def trigger_game_over(self):
         print("[GAME OVER] Triggered")
