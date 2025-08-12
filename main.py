@@ -3,7 +3,7 @@ import sys
 import os, sys
 from pathlib import Path
 import random
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import pandas as pd;
 import matplotlib.pyplot as plt
 import pygame
@@ -101,6 +101,77 @@ tile_particle_map = {
     "moon": SparkleParticle,
     "thedevil": FireParticle,
 }
+
+class _HUDMessage:
+    def __init__(
+        self,
+        text: str,
+        start_ms: int,
+        hold_ms: int,
+        fade_ms: int,
+        color: Tuple[int,int,int],
+        bg_rgba: Tuple[int,int,int,int],
+        font: pygame.font.Font,
+        where: str,
+        padding: int,
+        max_width: Optional[int] = None,
+    ):
+        self.text = text
+        self.start_ms = start_ms
+        self.hold_ms = max(0, hold_ms)
+        self.fade_ms = max(1, fade_ms)
+        self.color = color
+        self.bg_rgba = bg_rgba
+        self.font = font
+        self.where = where  # 'top', 'center', 'bottom'
+        self.padding = padding
+        self.max_width = max_width
+
+        # Pre-render text surface (no alpha yet; we’ll apply per-frame)
+        self.text_surf = self._render_wrapped_text(text, font, color, max_width)
+        tw, th = self.text_surf.get_size()
+        self.box_w = tw + padding * 2
+        self.box_h = th + padding * 2
+
+    def _render_wrapped_text(self, text, font, color, max_width):
+        if not self.max_width:
+            return font.render(text, True, color)
+
+        # Very simple word-wrap
+        words = text.split()
+        lines, line = [], ""
+        for w in words:
+            test = (line + " " + w).strip()
+            if font.size(test)[0] <= self.max_width:
+                line = test
+            else:
+                if line: lines.append(line)
+                line = w
+        if line: lines.append(line)
+
+        # Blit lines into one surface
+        line_surfs = [font.render(ln, True, color) for ln in lines]
+        width = min(self.max_width, max(s.get_width() for s in line_surfs)) if line_surfs else 1
+        height = sum(s.get_height() for s in line_surfs)
+        surf = pygame.Surface((width, height), pygame.SRCALPHA)
+        y = 0
+        for s in line_surfs:
+            surf.blit(s, (0, y))
+            y += s.get_height()
+        return surf
+
+    def alpha_at(self, now_ms: int) -> int:
+        elapsed = now_ms - self.start_ms
+        if elapsed <= self.hold_ms:
+            return 255
+        t = elapsed - self.hold_ms
+        if t >= self.fade_ms:
+            return 0
+        return int(255 * (1 - t / self.fade_ms))
+
+    def alive(self, now_ms: int) -> bool:
+        return self.alpha_at(now_ms) > 0
+
 
 class MahjongGame(QWidget):
     USE_PIXEL_COORDS = False  # <- change to True if x,y are pixels
@@ -718,6 +789,101 @@ class MahjongGame(QWidget):
 
         self.surface.blit(score_surface, score_rect)
 
+    def toast(
+            self,
+            message: str,
+            *,
+            hold_ms: int = 1500,
+            fade_ms: int = 600,
+            where: str = "top",  # 'top' | 'center' | 'bottom'
+            color=(255, 255, 255),
+            bg_rgba=(0, 0, 0, 170),
+            padding: int = 8,
+            max_width: Optional[int] = None,
+    ):
+        """Queue a transient UI message that fades out."""
+        now = pygame.time.get_ticks()
+        if not hasattr(self, "hud_messages"):
+            self.hud_messages = []
+
+        msg = _HUDMessage(
+            text=message,
+            start_ms=now,
+            hold_ms=hold_ms,
+            fade_ms=fade_ms,
+            color=color,
+            bg_rgba=bg_rgba,
+            font=self.font_title,
+            where=where,
+            padding=padding,
+            max_width=max_width,
+        )
+        self.hud_messages.append(msg)
+
+    def _update_hud_messages(self):
+        """Call every frame before drawing messages."""
+        if not hasattr(self, "hud_messages"):
+            self.hud_messages = []
+        now = pygame.time.get_ticks()
+        self.hud_messages = [m for m in self.hud_messages if m.alive(now)]
+
+    def _draw_hud_messages(self, surface: pygame.Surface):
+        """
+        Call every frame AFTER drawing your board/tiles/UI, so the messages are on top.
+        Positions:
+          - top:    stacked from top-center downward
+          - center: stacked around screen center
+          - bottom: stacked from bottom-center upward
+        """
+        if not getattr(self, "hud_messages", None):
+            return
+
+        now = pygame.time.get_ticks()
+        width, height = surface.get_width(), surface.get_height()
+
+        # Bucket by location to stack cleanly
+        buckets = {"top": [], "center": [], "bottom": []}
+        for m in self.hud_messages:
+            buckets.get(m.where, buckets["top"]).append(m)
+
+        for where, items in buckets.items():
+            if not items:
+                continue
+
+            # Measure total height for stacking
+            total_h = sum(m.box_h for m in items) + (len(items) - 1) * 6
+            if where == "top":
+                y_start = 16
+            elif where == "center":
+                y_start = (height - total_h) // 2
+            else:  # bottom
+                y_start = height - total_h - 16
+
+            y = y_start
+            for m in items:
+                alpha = m.alpha_at(now)
+                if alpha <= 0:
+                    continue
+
+                # Centered horizontally
+                x = (width - m.box_w) // 2
+
+                # Background box (with per-pixel alpha)
+                box = pygame.Surface((m.box_w, m.box_h), pygame.SRCALPHA)
+                box.fill(m.bg_rgba)
+                # Optional: tiny rounding by drawing a rect onto an alpha surface, kept simple here
+                box.set_alpha(alpha)
+
+                # Text (copy to apply alpha)
+                txt = m.text_surf.copy()
+                txt.set_alpha(alpha)
+
+                # Blit
+                surface.blit(box, (x, y))
+                surface.blit(txt, (x + m.padding, y + m.padding))
+
+                y += m.box_h + 6
+
     def reset_round_score_state(self):
         self.tile_match_count.clear()
         self.combo_multiplier = 1
@@ -1282,6 +1448,9 @@ class MahjongGame(QWidget):
         return self.action_bar_rect.collidepoint(pos)
 
     def mouseMoveEvent(self, event):
+        self.last_mouse_pos = (event.pos().x(), event.pos().y())
+        self.update_hover_state()
+
         if self.dragging_item:
             self.drag_mouse_pos = (event.pos().x(), event.pos().y())
             dx = abs(self.drag_mouse_pos[0] - self.drag_start_pos[0])
@@ -1421,7 +1590,8 @@ class MahjongGame(QWidget):
         if match_cd is not None:
             last_match_use = self.inventory_cooldowns.get(item_id, -9999)
             if self.match_count - last_match_use < match_cd:
-                print(f"[COOLDOWN] {item['title']} still on match cooldown.")
+                message = f"[COOLDOWN] {item['title']} still on match cooldown."
+                self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
                 return
             self.inventory_cooldowns[item_id] = self.match_count
 
@@ -1430,7 +1600,8 @@ class MahjongGame(QWidget):
         if time_cd is not None:
             last_time_use = self.inventory_timers.get(item_id, -9999)
             if now - last_time_use < time_cd:
-                print(f"[COOLDOWN] {item['title']} still on time cooldown.")
+                message = f"[COOLDOWN] {item['title']} still on time cooldown."
+                self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
                 return
             self.inventory_timers[item_id] = now
 
@@ -1441,9 +1612,11 @@ class MahjongGame(QWidget):
                 print(f"[USED UP] {item['title']} has no charges left.")
                 return
             item["charges"] -= 1
-            print(f"[USE] {item['title']} used. Charges left: {item['charges']}")
+            message = f"[USE] {item['title']} used. Charges left: {item['charges']}"
+            self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
             if item["charges"] == 0:
-                print(f"[REMOVE] {item['title']} removed from inventory.")
+                message = f"[REMOVE] {item['title']} removed from inventory."
+                self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
                 self.inventory.pop(index)
                 return
 
@@ -1472,7 +1645,8 @@ class MahjongGame(QWidget):
                     item["charge"] -= 1
                     item["cooldown"] = item.get("cooldown_match", 20)
 
-                    print(f"[ITEM] {item['title']} used. Remaining charges: {item['charge']}")
+                    message = f"[ITEM] {item['title']} used. Remaining charges: {item['charge']}"
+                    self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
                 else:
                     print(f"[ITEM] {item['title']} requires exactly 1 selected tile.")
         elif effect_type == "doppelganger_swap":
@@ -1496,12 +1670,14 @@ class MahjongGame(QWidget):
             # If we're already in targeting mode, don't spend a charge—just remind the user.
             if getattr(self, "cerberus_selecting", False):
                 remaining = 3 - len(getattr(self, "cerberus_pending_keys", []))
-                print(f"[CERBERUS] Already targeting — pick {remaining} more.")
+                message = f"[CERBERUS] Already targeting — pick {remaining} more."
+                self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
                 return
 
             # (Optional) If the effect is already active after inversion, ignore further uses.
             if getattr(self, "cerberus_effect_active", False):
-                print("[CERBERUS] Effect already active.")
+                message = f"[CERBERUS] Effect already active."
+                self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
                 return
 
             # cooldown gate
@@ -1509,12 +1685,14 @@ class MahjongGame(QWidget):
             if cr > 0:
                 s = "match" if cr == 1 else "matches"
                 print(f"[CLICK] inventory_{index} button clicked")
-                print(f"[COOLDOWN] Cerberus still on match cooldown ({cr} {s} remaining).")
+                message = f"[COOLDOWN] Cerberus still on match cooldown ({cr} {s} remaining)."
+                self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
                 return
 
             # charges gate
             if int(item.get("charges", 0)) <= 0:
-                print("[ITEM] Cerberus has no charges left.")
+                message = "[ITEM] Cerberus has no charges left."
+                self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
                 return
 
             self.use_cerberus(index)
@@ -1626,18 +1804,21 @@ class MahjongGame(QWidget):
         base_target = self.get_base_target_score()
         if hasattr(self, "djinn_active") and self.djinn_active:
             base_target += self.djinn_target_increase
-            print(f"[DJINN] Increased target score to {base_target} due to wish.")
+            message = f"[DJINN] Increased target score to {base_target} due to wish."
+            self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
 
 
         reduction = 1
         for item in self.inventory:
             if item['title'] == "Golem":
                 reduction = int(item['effects']['reduction'])
-            self.target_score = int(max(0, base_target/reduction))
+                self.target_score = int(max(0, base_target/reduction))
             if item["unique_id"] == "banshee":
                 increase = item.get("effects", {}).get("target_score_increase", 0)
                 base_target += increase
-                print(f"[BANSHEE] Increased target score by {increase}. New target: {self.target_score}")
+                message = f"[BANSHEE] Increased target score by {increase}. New target: {base_target}"
+                self.toast(f"{message}", hold_ms=6000, fade_ms=500, where="top")
+                self.target_score = base_target
 
         else:
             self.target_score = base_target
@@ -2117,35 +2298,50 @@ class MahjongGame(QWidget):
         if not hasattr(self, 'last_mouse_pos'):
             return
 
+        # Ensure (x, y) tuple, not QPoint
         pos = self.last_mouse_pos
+        if hasattr(pos, "x") and callable(pos.x):
+            pos = (pos.x(), pos.y())
+        elif isinstance(pos, tuple):
+            pos = (int(pos[0]), int(pos[1]))
+        else:
+            # defensive
+            try:
+                pos = (int(pos[0]), int(pos[1]))
+            except Exception:
+                return
+
         self.item_card.hide()
         self.hovered_inventory_index = None
 
-        # Use a fixed display location for all item cards
+        # Fixed card anchor (you can keep this or anchor to hovered rect)
         anchor_rect = self.button_rects.get("inventory_0")
         card_x = anchor_rect.x if anchor_rect else 0
-        card_y = anchor_rect.y - TILE_HEIGHT * 4 - 10 if anchor_rect else 0
+        card_y = (
+                    anchor_rect.y - TILE_WIDTH * 4 - 300) if anchor_rect else 0  # uses TILE_WIDTH or TILE_HEIGHT per your UI
         card_y = max(0, card_y)
 
-        # === Check inventory items ===
-        for i in range(5):
-            rect = self.button_rects.get(f"inventory_{i}")
-            if rect and rect.collidepoint(pos):
-                item = self.inventory[i] if i < len(self.inventory) else None
-                self.hovered_inventory_index = i
-                if item:
-                    self.item_card.show(item, (card_x, card_y))
-                return
-
-        # === Check shop items ===
+        # === SHOP FIRST when shop is open ===
         if self.in_shop and hasattr(self, "shop_button_rects"):
             for rect, item in self.shop_button_rects:
-                if rect.collidepoint(pos):
-                    self.item_card.show(item, (card_x, card_y))
+                if rect and rect.collidepoint(pos):
+                    if item:
+                        self.item_card.show(item, (card_x, card_y))
+                    return  # stop here so inventory doesn't steal hover
+
+        # === INVENTORY hover only when NOT in shop ===
+        if not self.in_shop:
+            for i in range(5):
+                rect = self.button_rects.get(f"inventory_{i}")
+                if rect and rect.collidepoint(pos):
+                    item = self.inventory[i] if i < len(self.inventory) else None
+                    self.hovered_inventory_index = i
+                    if item:
+                        self.item_card.show(item, (card_x, card_y))
                     return
 
+        # Nothing hovered
         self.hovered_inventory_index = None
-
 
     def calculate_top_tiles(self):
         self.top_tiles = set()
@@ -2162,6 +2358,7 @@ class MahjongGame(QWidget):
 
     def update_canvas(self):
         ACTION_BAR_HEIGHT = 100
+        self._update_hud_messages()
         self.calculate_top_tiles()
         self.clear_background()
         self.draw_background_tiles()
@@ -2179,6 +2376,7 @@ class MahjongGame(QWidget):
         self.draw_overlays()
         self.draw_sell_confirmation()
         self.item_card.draw(self.surface)
+        self._draw_hud_messages(self.surface)
         self.update_game_state()
         self.blit_to_qt()
 
