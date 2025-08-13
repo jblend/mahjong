@@ -1,39 +1,43 @@
 # MahjongGame.spec
+# Build:  py -m PyInstaller MahjongGame.spec --noconfirm --clean
+
+from pathlib import Path
+from PyInstaller.building.build_main import Analysis, PYZ, EXE, COLLECT
+from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks import collect_submodules
-import glob, os
 
-# Include entire folders
-datas = []
-for folder in ["assets", "music", "sounds", "fonts"]:
-    if os.path.isdir(folder):
-        # (src, dest) pairs
-        datas.append((folder, folder))
+proj_dir = Path.cwd().resolve()
 
-# If you use PySide/PyQt + Pygame, pull hidden imports (if needed)
 hiddenimports = []
-hiddenimports += collect_submodules("pygame")  # often not needed, but safe
-# hiddenimports += collect_submodules("PyQt5")  # uncomment if Qt parts missed
+try:
+    hiddenimports += collect_submodules('pygame')
+except Exception:
+    pass
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=[str(proj_dir)],
     binaries=[],
-    datas=datas,
+    datas=[],                 # <-- no Tree here
     hiddenimports=hiddenimports,
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
     noarchive=False,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     name='MahjongGame',
-    debug=False,
-    strip=False,
-    upx=True,          # if UPX installed; speeds load a bit
-    console=False,     # no console window
-    icon='assets/game.ico'  # optional
+    icon=str(proj_dir / 'assets' / 'game.ico'),
+    console=True,            # set False to hide console
+)
+
+coll = COLLECT(
+    exe, a.binaries, a.zipfiles, a.datas,
+    Tree(str(proj_dir / 'assets'), prefix='assets'),  # <-- include whole assets/ tree
+    strip=False, upx=False, name='MahjongGame'
 )

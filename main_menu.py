@@ -2,6 +2,7 @@ import pygame
 import os
 import math
 import random
+from paths import asset
 import threading
 vergilia = os.path.join("assets", "fonts", "vergilia.ttf")
 Aveschon = os.path.join("assets", "fonts", "Aveschon.otf")
@@ -12,6 +13,7 @@ HEIGHT = 1000
 
 class MainMenuOverlay:
     def __init__(self, surface, logo_image):
+        self.music_dir = asset("music")
         self.surface = surface
         self.logo_font_2 = pygame.font.Font(Aveschon, 80)
         self.logo_font = pygame.font.Font(Aveschon, 75)

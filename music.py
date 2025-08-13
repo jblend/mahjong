@@ -2,7 +2,6 @@ import os
 import pygame
 import random
 
-
 class MusicManager:
     def __init__(self, music_folder):
         self.current_track = None

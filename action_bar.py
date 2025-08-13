@@ -1,4 +1,6 @@
 # action_bar.py
+from pathlib import Path
+from paths import asset
 import pygame
 import os
 import sys
@@ -23,6 +25,24 @@ class ActionBar:
         self.button_rects = game.button_rects
         self.action_bar_top = game.height() - game.ACTION_BAR_HEIGHT
         self.gui_font = game.gui_font
+        self.item_dir = asset("items")
+
+    def resolve_asset_path(self, rel_or_full) -> Path:
+        """Accepts absolute paths, 'assets/...', 'items/...', or bare filenames."""
+        if not rel_or_full:
+            return None
+        p = Path(rel_or_full)
+        if p.is_absolute():
+            return p
+
+        s = str(p).replace("\\", "/").lstrip("./")
+
+        # Strip leading 'assets/' if present (so JSON can use 'assets/...').
+        if s.startswith("assets/"):
+            s = s[len("assets/"):]  # -> 'items/cerberus.png'
+
+        parts = s.split("/")  # e.g., ['items', 'cerberus.png']
+        return asset(*parts)  # joins under your packaged assets dir
 
     def draw(self):
         self.__draw_score_and_wallet()
@@ -210,10 +230,22 @@ class ActionBar:
             surf = self._inv_icon_cache.get(key)
             if surf:
                 return surf
-            full_path = os.path.join(BASE_DIR, icon_path)
-            if not os.path.exists(full_path):
+
+            # Try full resolution via asset()
+            full_path = self.resolve_asset_path(icon_path)
+
+            # Fallbacks: allow bare filenames by looking in items/
+            if (not full_path) or (not full_path.exists()):
+                # If JSON only provided 'cerberus.png', look in self.game.item_dir
+                cand = (self.game.item_dir / str(icon_path)) if hasattr(self.game, "item_dir") else None
+                if cand and cand.exists():
+                    full_path = cand
+
+            if (not full_path) or (not full_path.exists()):
+                print(f"[ICON] not found: {icon_path}")
                 return None
-            raw = pygame.image.load(full_path).convert_alpha()
+
+            raw = pygame.image.load(str(full_path)).convert_alpha()
             surf = pygame.transform.smoothscale(raw, (slot_w - 4, slot_h - 4))
             self._inv_icon_cache[key] = surf
             return surf

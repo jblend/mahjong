@@ -2,6 +2,7 @@ import datetime
 import sys
 import os, sys
 from pathlib import Path
+from paths import asset
 import random
 from typing import List, Tuple, Optional
 import pandas as pd;
@@ -18,6 +19,7 @@ from encounterengine import EncounterEngine
 from action_bar import ActionBar
 from item_description import ItemDescriptionCard
 name = "Curiosima"
+# call to build: py -m PyInstaller MahjongGame.spec --noconfirm --clean
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         # If bundled by PyInstaller or similar
@@ -78,9 +80,11 @@ from assets.fx.particle import SmokeParticle, SparkleParticle, FireParticle, Win
 from music import MusicManager
 
 
-TILES_ROOT = "./assets/tiles/classic"
-BG_ROOT = "./assets/bg"
-ITEMS = "./assets/items/shop_items.json"
+# TILES_ROOT = "./assets/tiles/classic"
+
+# BG_ROOT = "./assets/bg"
+
+# ITEMS = "./assets/items/shop_items.json"
 TILE_WIDTH, TILE_HEIGHT, TILE_DEPTH = 64, 96, 6
 MAX_ROWS = 6
 MAX_COLS = 18
@@ -181,6 +185,9 @@ class MahjongGame(QWidget):
     def __init__(self):
         super().__init__()
         try:
+            self.tiles_dir = asset("tiles/classic")
+            self.bg_dir = asset("bg")
+            self.items_db = asset("items/shop_items.json")
             self.setWindowTitle("Mahjong Pygame + Qt5")
             self.setMouseTracking(True)
             self.setGeometry(100, 100, HEIGHT, WIDTH)
@@ -273,7 +280,7 @@ class MahjongGame(QWidget):
             # For UI tracking
             self.button_rects = {}
             self.dragging_volume = False
-            self.music_volume = 0.25
+            self.music_volume = 0.05
 
 
             self.particles = []
@@ -342,7 +349,8 @@ class MahjongGame(QWidget):
             pygame.init()
             try:
                 pygame.mixer.init()
-                self.music_manager = MusicManager("assets/music/")
+                self.music_dir = asset("music")
+                self.music_manager = MusicManager(self.music_dir)
                 self.music_manager.play_current()
                 self.music_manager.set_volume(self.music_volume)
             except pygame.error as e:
@@ -353,26 +361,29 @@ class MahjongGame(QWidget):
             self.setMouseTracking(True)
 
             pygame.display.set_mode((1, 1), pygame.HIDDEN)
+            self.icons_dir = asset("icons")
             self.icon_images = {
-                "prev": pygame.image.load("assets/icons/prev_track.png").convert_alpha(),
-                "next": pygame.image.load("assets/icons/next_track.png").convert_alpha(),
-                "volume": pygame.image.load("assets/icons/volume_icon.png").convert_alpha()
+                "prev": pygame.image.load(f"{self.icons_dir}/prev_track.png").convert_alpha(),
+                "next": pygame.image.load(f"{self.icons_dir}/next_track.png").convert_alpha(),
+                "volume": pygame.image.load(f"{self.icons_dir}/volume_icon.png").convert_alpha()
             }
-            bg_path = os.path.join(BG_ROOT, "bg.png")
+            bg_path = os.path.join(self.bg_dir, "bg.png")
             pygame.font.init()
 
             for event in pygame.event.get():
                 self.music_manager.handle_event(event)
 
-            self.match_sound = pygame.mixer.Sound(os.path.join("assets", "sfx", "ignite.wav"))
-            self.match_sound = pygame.mixer.Sound(os.path.join("assets", "sfx", "church-bell-toll.mp3"))
+            self.sfx_dir = asset("sfx")
+            self.match_sound = pygame.mixer.Sound(os.path.join(self.sfx_dir, "ignite.wav"))
+            self.match_sound = pygame.mixer.Sound(os.path.join(self.sfx_dir, "church-bell-toll.mp3"))
             self.match_sound.set_volume(1)  # Optional
 
-            OldeEnglishRegular = os.path.join("assets", "fonts", "OldeEnglishRegular-Zd2J.ttf")
-            Aveschon = os.path.join("assets", "fonts", "Aveschon.otf")
-            FacultyGlyphicRegular = os.path.join("assets", "fonts", "FacultyGlyphic-Regular.ttf")
-            MerchantVF = os.path.join("assets", "fonts", "MerchantVF.ttf")
-            vergilia = os.path.join("assets", "fonts", "vergilia.ttf")
+            self.font_dir = asset("fonts")
+            OldeEnglishRegular = os.path.join(self.font_dir, "OldeEnglishRegular-Zd2J.ttf")
+            Aveschon = os.path.join(self.font_dir, "Aveschon.otf")
+            FacultyGlyphicRegular = os.path.join(self.font_dir, "FacultyGlyphic-Regular.ttf")
+            MerchantVF = os.path.join(self.font_dir, "MerchantVF.ttf")
+            vergilia = os.path.join(self.font_dir, "vergilia.ttf")
             self.font_title = pygame.font.Font(vergilia, 36)
             self.font_body = pygame.font.Font(FacultyGlyphicRegular, 20)
             self.combo_font = pygame.font.Font(vergilia, 36)  # 36pt size
@@ -533,10 +544,10 @@ class MahjongGame(QWidget):
 
     def load_tileset_images(self):
         self.tile_images.clear()
-        for fname in os.listdir(TILES_ROOT):
+        for fname in os.listdir(self.tiles_dir):
             if fname.endswith(".png"):
                 name = os.path.splitext(fname)[0]
-                path = os.path.join(TILES_ROOT, fname)
+                path = os.path.join(self.tiles_dir, fname)
                 try:
                     image = pygame.image.load(path).convert_alpha()
                     self.tile_images[name] = image
@@ -909,69 +920,56 @@ class MahjongGame(QWidget):
         self._vacated_during_animation = set()
 
     def mousePressEvent(self, event):
-        """
-        Central mouse handler.
-        - Normalizes click coords
-        - Short-circuits on modal overlays (sell confirm)
-        - Delegates the rest to focused handlers (buttons, shop, boosters, game over, action bar, tiles)
-        """
         x, y = event.pos().x(), event.pos().y()
         self.last_mouse_pos = (x, y)
 
-        # 1) Modal overlay always gets first dibs
         if self._handle_sell_confirm_modal_click(x, y):
             return
 
-        # 2) Optional debug marker
         self._debug_click_marker(x, y)
 
-        # Cerberus targeting gets first dibs (modal)
         if getattr(self, "cerberus_selecting", False):
-            # NOTE: call the function you actually implemented
             if self._cerberus_target_click(event):
                 return
 
-        # 3) Global UI buttons (music, sliders, shop buttons, booster buttons, etc.)
+        # ── Booster UI gets priority ─────────────────────────────────────────────
+        if self.in_shop:
+            # 5) Booster selector overlay (5-tile picker)
+            if self.show_booster_selector and self._handle_booster_selector_clicks(x, y):
+                return
+
+            # 6) Booster mini-UI (inline confirm/skip & tile toggles)
+            if self.booster_choices and self._handle_booster_inline_clicks(x, y):
+                return
+        # ─────────────────────────────────────────────────────────────────────────
+
+        # 3) Global UI buttons (music, sliders, shop buttons, etc.)
         if self._handle_global_buttons(event, x, y):
             return
 
-        # 4) Shop UI: buying and inventory selling (right-click)
+        # 4) Shop UI
         if self.in_shop:
             if self._handle_shop_clicks(event, x, y):
                 return
         else:
-            # 5) Booster selector UI (when the 5-tile picker overlay is showing)
-            if self.show_booster_selector:
-                if self._handle_booster_selector_clicks(x, y):
+            # (cerberus targeting block unchanged)
+            if getattr(self, "cerberus_targeting", False):
+                t = self._topmost_tile_at_point(x, y)
+                if not t:
                     return
+                key = self._stack_key(t)
+                if key not in self.cerberus_pending_keys:
+                    self.cerberus_pending_keys.append(key)
+                    self._cerberus_flash_stack(key)
+                    print(f"[CERBERUS] Selected stack {key} ({len(self.cerberus_pending_keys)}/3)")
+                if len(self.cerberus_pending_keys) == 3:
+                    self._cerberus_activate()
+                return
 
-            # 6) Booster mini-UI confirm/skip (when choices exist but overlay not active)
-            if self.booster_choices:
-                if self._handle_booster_inline_clicks(x, y):
-                    return
-
-        # 7) Game-over overlay (New Game)
         if self._handle_game_over_clicks(x, y):
             return
 
-        # 8) Action bar interactions (drag start, right-click sell in shop)
         if self._handle_action_bar_clicks(event, x, y):
-            return
-
-        # 9) Fallback: tile selection in the board area
-
-        # -- CERBERUS TARGETING (pick 3 stacks) --
-        if getattr(self, "cerberus_targeting", False):
-            t = self._topmost_tile_at_point(event.pos().x(), event.pos().y())
-            if not t:
-                return  # click missed; stay in targeting
-            key = self._stack_key(t)
-            if key not in self.cerberus_pending_keys:
-                self.cerberus_pending_keys.append(key)
-                self._cerberus_flash_stack(key)  # quick visual feedback
-                print(f"[CERBERUS] Selected stack {key} ({len(self.cerberus_pending_keys)}/3)")
-            if len(self.cerberus_pending_keys) == 3:
-                self._cerberus_activate()
             return
 
         self.handle_click(event)
@@ -1259,7 +1257,7 @@ class MahjongGame(QWidget):
         if confirm_rect.collidepoint(self.last_mouse_pos):
             if len(self.booster_selected_indices) == 3:
                 for idx in self.booster_selected_indices:
-                    self.tile_pool.append(self.booster_choices[idx])
+                    self.booster_history.append(self.booster_choices[idx])
                 self.exit_booster_selector()
             return True
 
@@ -1271,31 +1269,37 @@ class MahjongGame(QWidget):
         return False
 
     def _handle_booster_inline_clicks(self, x, y):
-        """
-        INLINE BOOSTER UI (no full overlay; choices exist + small confirm/skip):
-        - Toggle up to 3 selections
-        - Confirm adds 2x of each choice into booster_pool (as in original code)
-        - Skip clears selection
-        """
+        """Toggle up to 3 selections; Confirm adds 2x of each; Skip clears."""
+        if not self.booster_choices or not getattr(self, "booster_button_rects", None):
+            return False
+
+        # Tile buttons
         for i, (rect, _tile_name) in enumerate(self.booster_button_rects):
-            if rect.collidepoint(self.last_mouse_pos):
+            if rect.collidepoint(x, y):  # <- use x,y directly
                 if i in self.booster_selected_indices:
                     self.booster_selected_indices.remove(i)
                 elif len(self.booster_selected_indices) < 3:
                     self.booster_selected_indices.add(i)
+                print(f"[BOOSTER] toggled idx={i} → {sorted(self.booster_selected_indices)}")
                 return True
 
+        # Confirm
         confirm_rect = self.button_rects.get("booster_confirm")
-        if confirm_rect and confirm_rect.collidepoint(self.last_mouse_pos):
+        if confirm_rect and confirm_rect.collidepoint(x, y):
             if len(self.booster_selected_indices) == 3:
-                selected_names = [self.booster_choices[i] for i in self.booster_selected_indices]
-                self.booster_pool.extend(selected_names * 2)
+                selected = [self.booster_choices[i] for i in sorted(self.booster_selected_indices)]
+                self.self.booster_history.extend(selected * 2)  # two of each
+                print(f"[BOOSTER] confirmed {selected} (x2 each)")
                 self.booster_choices = []
                 self.booster_selected_indices.clear()
+            else:
+                print("[BOOSTER] confirm ignored; need 3 selections")
             return True
 
+        # Skip
         skip_rect = self.button_rects.get("booster_skip")
-        if skip_rect and skip_rect.collidepoint(self.last_mouse_pos):
+        if skip_rect and skip_rect.collidepoint(x, y):
+            print("[BOOSTER] skipped")
             self.booster_choices = []
             self.booster_selected_indices.clear()
             return True
@@ -1509,7 +1513,7 @@ class MahjongGame(QWidget):
 
     def get_random_booster_tiles(self, count):
         try:
-            with open(ITEMS, "r") as f:
+            with open(self.items_db, "r") as f:
                 all_tiles = json.load(f)
             return random.sample(all_tiles, min(count, len(all_tiles)))
         except Exception as e:
@@ -2854,7 +2858,7 @@ class MahjongGame(QWidget):
             exclude_titles = set()
 
         try:
-            with open(ITEMS, "r") as f:
+            with open(self.items_db, "r") as f:
                 all_items = json.load(f)
 
             all_items = [item for item in all_items if "title" in item]
@@ -2943,9 +2947,9 @@ class MahjongGame(QWidget):
         self.shop_message = ""
 
         # Load shop item pool only once
-        print(f"[SHOP] Attempting to load shop items from: {ITEMS}")
+        print(f"[SHOP] Attempting to load shop items from: {self.items_db}")
         try:
-            with open(ITEMS, "r") as f:
+            with open(self.items_db, "r") as f:
                 self.all_shop_items = json.load(f)
                 print(f"[SHOP] Loaded {len(self.all_shop_items)} items from JSON.")
 
